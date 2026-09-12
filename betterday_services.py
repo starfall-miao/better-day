@@ -2,8 +2,7 @@
 更好的一天 —— 服务层（纯逻辑，无 Qt 依赖，可单独测试）
 
 负责：
-- Open-Meteo 天气（无需 API Key）
-- 城市地理编码
+- uapis.cn 天气（当前 / 24 小时 / 7 日预报 + 空气质量，无需 API Key）
 - 农历 / 黄历 / 节日 / 节气（lunar-python）
 - 每日一言（hitokoto）
 - 整周课程表结构整理
@@ -20,46 +19,31 @@ from lunar_python import Solar
 from lunar_python.util import HolidayUtil
 
 
-# --------------------------------------------------------------------------
-# WMO 天气代码 → (中文描述, 表情符号)
-# --------------------------------------------------------------------------
-WMO_CODE_MAP = {
-    0: ("晴", "☀️"),
-    1: ("大致晴朗", "🌤️"),
-    2: ("多云", "⛅"),
-    3: ("阴", "☁️"),
-    45: ("雾", "🌫️"),
-    48: ("雾凇", "🌫️"),
-    51: ("小毛毛雨", "🌦️"),
-    53: ("毛毛雨", "🌦️"),
-    55: ("大毛毛雨", "🌧️"),
-    56: ("冻毛毛雨", "🌧️"),
-    57: ("强冻毛毛雨", "🌧️"),
-    61: ("小雨", "🌧️"),
-    63: ("中雨", "🌧️"),
-    65: ("大雨", "🌧️"),
-    66: ("冻雨", "🌧️"),
-    67: ("强冻雨", "🌧️"),
-    71: ("小雪", "🌨️"),
-    73: ("中雪", "🌨️"),
-    75: ("大雪", "❄️"),
-    77: ("雪粒", "🌨️"),
-    80: ("小阵雨", "🌦️"),
-    81: ("阵雨", "🌧️"),
-    82: ("强阵雨", "⛈️"),
-    85: ("小阵雪", "🌨️"),
-    86: ("大阵雪", "❄️"),
-    95: ("雷阵雨", "⛈️"),
-    96: ("雷阵雨伴冰雹", "⛈️"),
-    99: ("强雷暴伴冰雹", "⛈️"),
-}
-
 WEEKDAY_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
 
 
-def wmo(code):
-    """根据 WMO 天气代码返回 (中文, emoji)。"""
-    return WMO_CODE_MAP.get(code, ("未知", "🌡️"))
+def weather_emoji(text):
+    """把 uapis.cn 返回的中文天气描述映射成 emoji（非固定枚举，做关键词匹配）。"""
+    t = (text or "").strip()
+    if not t:
+        return "🌡️"
+    if "雷" in t:
+        return "⛈️"
+    if "雪" in t:
+        return "❄️"
+    if "雨" in t:
+        return "🌧️"
+    if "雾" in t or "霾" in t:
+        return "🌫️"
+    if "沙" in t or "尘" in t:
+        return "🌪️"
+    if "阴" in t:
+        return "☁️"
+    if "多云" in t:
+        return "⛅"
+    if "晴" in t:
+        return "☀️"
+    return "🌤️"
 
 
 def http_get_json(url, timeout=10):
@@ -72,120 +56,80 @@ def http_get_json(url, timeout=10):
 
 
 # --------------------------------------------------------------------------
-# 天气（Open-Meteo，无需 API Key）
+# 天气（uapis.cn，无需 API Key）
 # --------------------------------------------------------------------------
-def geocode(city):
-    """城市名 → {name, lat, lon, timezone}；失败返回 None。"""
-    if not city or not str(city).strip():
-        return None
-    url = (
-        "https://geocoding-api.open-meteo.com/v1/search?name="
-        + urllib.parse.quote(str(city).strip())
-        + "&count=1&language=zh&format=json"
-    )
-    data = http_get_json(url)
-    results = data.get("results") or []
-    if not results:
-        return None
-    r = results[0]
-    return {
-        "name": r.get("name") or str(city),
-        "lat": r.get("latitude"),
-        "lon": r.get("longitude"),
-        "timezone": r.get("timezone") or "auto",
-    }
+def fetch_weather(city, timeout=12):
+    """从 uapis.cn 拉取实时天气 + 7 日预报 + 24 小时预报（一次请求）。
 
-
-def fetch_weather_raw(lat, lon, timezone="auto", forecast_days=7):
+    失败会抛出异常（网络错误 / urllib 错误），由调用方兜底。
+    """
     params = urllib.parse.urlencode(
         {
-            "latitude": lat,
-            "longitude": lon,
-            "current": "temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,is_day",
-            "hourly": "temperature_2m,weather_code,precipitation_probability",
-            "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
-            "timezone": timezone,
-            "forecast_days": forecast_days,
+            "city": str(city).strip(),
+            "extended": "true",
+            "forecast": "true",
+            "hourly": "true",
         }
     )
-    return http_get_json("https://api.open-meteo.com/v1/forecast?" + params)
+    return http_get_json("https://uapis.cn/api/v1/misc/weather?" + params, timeout=timeout)
 
 
 def build_now_weather(data):
-    cur = data.get("current") or {}
-    text, emoji = wmo(cur.get("weather_code"))
-    temp = cur.get("temperature_2m")
-    feels = cur.get("apparent_temperature")
+    text = data.get("weather") or ""
+    temp = data.get("temperature")
+    feels = data.get("feels_like")
+    wind = " ".join(x for x in (data.get("wind_direction"), data.get("wind_power")) if x)
     return {
-        "temp": round(temp) if temp is not None else None,
-        "feelsLike": round(feels) if feels is not None else None,
-        "humidity": cur.get("relative_humidity_2m"),
-        "wind": round(cur.get("wind_speed_10m"), 1) if cur.get("wind_speed_10m") is not None else None,
-        "isDay": bool(cur.get("is_day", 1)),
+        "temp": round(temp) if isinstance(temp, (int, float)) else None,
+        "feelsLike": round(feels) if isinstance(feels, (int, float)) else None,
+        "humidity": data.get("humidity"),
+        "wind": wind,
+        "isDay": True,
         "text": text,
-        "emoji": emoji,
+        "emoji": weather_emoji(text),
+        "aqi": data.get("aqi"),
+        "aqiCategory": data.get("aqi_category"),
+        "reportTime": data.get("report_time") or "",
     }
 
 
 def build_daily_weather(data):
-    daily = data.get("daily") or {}
-    times = daily.get("time") or []
-    codes = daily.get("weather_code") or []
-    tmax = daily.get("temperature_2m_max") or []
-    tmin = daily.get("temperature_2m_min") or []
     out = []
-    for i, t in enumerate(times):
-        code = codes[i] if i < len(codes) else 0
-        text, emoji = wmo(code)
-        try:
-            dt = datetime.strptime(t, "%Y-%m-%d")
-            weekday = WEEKDAY_CN[dt.weekday()]
-        except (ValueError, TypeError):
-            weekday = ""
+    for f in data.get("forecast") or []:
+        text = f.get("weather_day") or f.get("weather") or ""
         out.append(
             {
-                "date": t,
-                "weekday": weekday,
+                "date": f.get("date") or "",
+                "weekday": f.get("week") or "",
                 "text": text,
-                "emoji": emoji,
-                "tempMax": round(tmax[i]) if i < len(tmax) and tmax[i] is not None else None,
-                "tempMin": round(tmin[i]) if i < len(tmin) and tmin[i] is not None else None,
+                "emoji": weather_emoji(text),
+                "tempMax": round(f["temp_max"]) if isinstance(f.get("temp_max"), (int, float)) else None,
+                "tempMin": round(f["temp_min"]) if isinstance(f.get("temp_min"), (int, float)) else None,
             }
         )
     return out
 
 
 def build_hourly_weather(data, limit=24):
-    hourly = data.get("hourly") or {}
-    times = hourly.get("time") or []
-    temps = hourly.get("temperature_2m") or []
-    codes = hourly.get("weather_code") or []
-    pops = hourly.get("precipitation_probability") or []
-
-    # Open-Meteo 默认会返回 forecast_days 天内的全部小时数据，这里只取
-    # 「从当前整点开始的接下来 24 小时」。
-    now_hour = datetime.now().replace(minute=0, second=0, microsecond=0)
     out = []
-    for i, t in enumerate(times):
-        try:
-            dt = datetime.fromisoformat(t)
-            hour = f"{dt.hour:02d}:00"
-        except (ValueError, TypeError):
-            dt = None
-            hour = t
-
-        if dt is not None and dt < now_hour:
-            continue
-
-        code = codes[i] if i < len(codes) else 0
-        text, emoji = wmo(code)
+    for h in data.get("hourly_forecast") or []:
+        t = h.get("time") or ""
+        hour = t
+        # 兼容 "YYYY-MM-DD HH:MM:SS" 与 ISO8601（可能带时区）
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                hour = datetime.strptime(t[:19], fmt).strftime("%H:%M")
+                break
+            except (ValueError, TypeError):
+                continue
+        text = h.get("weather") or ""
         out.append(
             {
                 "hour": hour,
-                "temp": round(temps[i]) if i < len(temps) and temps[i] is not None else None,
+                "temp": round(h["temperature"]) if isinstance(h.get("temperature"), (int, float)) else None,
                 "text": text,
-                "emoji": emoji,
-                "precip": pops[i] if i < len(pops) and pops[i] is not None else None,
+                "emoji": weather_emoji(text),
+                "precip": h.get("precip"),
             }
         )
         if len(out) >= limit:

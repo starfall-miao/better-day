@@ -187,17 +187,27 @@ class Plugin(CW2Plugin):
 
     def _do_fetch_weather(self):
         location = (self.config.location or "").strip()
-        geo = svc.geocode(location)
-        if not geo:
-            self._status = f"找不到「{location}」这座城市，换个写法试试？"
+        raw = svc.fetch_weather(location)
+
+        # uapis.cn 出错时返回 {"code": ..., "message": ...}
+        err_msg = raw.get("message")
+        if err_msg:
+            self._now_weather = {}
+            self._daily_weather = []
+            self._hourly_weather = []
+            self._status = f"天气没取到：{err_msg}"
             self.dataChanged.emit()
             return
 
-        raw = svc.fetch_weather_raw(geo["lat"], geo["lon"], geo["timezone"])
         self._now_weather = svc.build_now_weather(raw)
         self._daily_weather = svc.build_daily_weather(raw)
         self._hourly_weather = svc.build_hourly_weather(raw)
-        self._location_name = geo["name"]
+        city = raw.get("city") or ""
+        province = raw.get("province") or ""
+        if city and province and city not in province:
+            self._location_name = f"{province}·{city}"
+        else:
+            self._location_name = city or province or location
         self._status = "天气更新好啦 ✨"
         self.dataChanged.emit()
 
