@@ -1,0 +1,14 @@
+[project]
+name = "com-starfall-betterday"
+version = "1.0.0"
+description = "更好的一天 - Class Widgets 2 插件"
+authors = [
+    {name = "落落"},
+]
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["lunar-python>=1.4.0"]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"

@@ -1,0 +1,48 @@
+name: Release Plugin
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install SDK tooling
+        run: |
+          pip install --upgrade pip
+          pip install class-widgets-sdk
+
+      - name: Build plugin packages
+        run: |
+          cw-plugin-pack
+          cw-plugin-pack --format zip
+
+      - name: Publish to plugin registry
+        env:
+          CWPT_TOKEN: ${{ secrets.CWPT_TOKEN }}
+        run: |
+          if [ -n "$CWPT_TOKEN" ]; then
+            cw-plugin-publish
+          else
+            echo "CWPT_TOKEN 未配置，跳过发布到插件广场（不影响生成 Release）。"
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            *.cwplugin
+            *.zip
