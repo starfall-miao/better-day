@@ -7,6 +7,7 @@ Class Widgets 2 插件入口。
 """
 
 import threading
+from datetime import datetime
 
 from PySide6.QtCore import Property, Signal, Slot
 
@@ -36,9 +37,10 @@ class Plugin(CW2Plugin):
         self._hourly_weather: list = []
         self._almanac: dict = {}
         self._quote: dict = {}
-        self._week_schedule: list = []
+        self._week_schedule: dict = {"periods": [], "days": []}
         self._location_name: str = ""
         self._status: str = ""
+        self._calendar_cache: dict = {}
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -75,6 +77,7 @@ class Plugin(CW2Plugin):
         self._refresh_schedule()
         self._refresh_weather()
         self._refresh_quote()
+        self._warm_calendar()
 
     def on_unload(self):
         pass
@@ -102,7 +105,7 @@ class Plugin(CW2Plugin):
     def quote(self):
         return self._quote
 
-    @Property(list, notify=dataChanged)
+    @Property(dict, notify=dataChanged)
     def weekSchedule(self):
         return self._week_schedule
 
@@ -150,7 +153,29 @@ class Plugin(CW2Plugin):
 
     @Slot(int, int, result=list)
     def calendar(self, year: int, month: int):
-        return svc.build_month_calendar(year, month)
+        key = (year, month)
+        if key not in self._calendar_cache:
+            self._calendar_cache[key] = svc.build_month_calendar(year, month)
+        return self._calendar_cache[key]
+
+    def _warm_calendar(self):
+        """预热当前月与前后一个月的日历，避免首次打开详情卡时卡顿。"""
+        now = datetime.now()
+        months = []
+        for dm in (-1, 0, 1):
+            y, m = now.year, now.month + dm
+            while m < 1:
+                y -= 1
+                m += 12
+            while m > 12:
+                y += 1
+                m -= 12
+            months.append((y, m))
+        for (y, m) in months:
+            try:
+                self._calendar_cache[(y, m)] = svc.build_month_calendar(y, m)
+            except Exception:
+                continue
 
     # ------------------------------------------------------------------
     # 内部刷新逻辑
@@ -187,23 +212,23 @@ class Plugin(CW2Plugin):
 
     def _do_fetch_weather(self):
         location = (self.config.location or "").strip()
-        raw = svc.fetch_weather(location)
-
-        # uapis.cn 出错时返回 {"code": ..., "message": ...}
-        err_msg = raw.get("message")
-        if err_msg:
+        try:
+            raw = svc.fetch_weather(location)
+        except ValueError as e:
             self._now_weather = {}
             self._daily_weather = []
             self._hourly_weather = []
-            self._status = f"天气没取到：{err_msg}"
+            self._status = str(e)
             self.dataChanged.emit()
             return
 
         self._now_weather = svc.build_now_weather(raw)
         self._daily_weather = svc.build_daily_weather(raw)
         self._hourly_weather = svc.build_hourly_weather(raw)
-        city = raw.get("city") or ""
-        province = raw.get("province") or ""
+
+        station = ((raw.get("real") or {}).get("station")) or {}
+        city = station.get("city") or ""
+        province = station.get("province") or ""
         if city and province and city not in province:
             self._location_name = f"{province}·{city}"
         else:

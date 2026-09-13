@@ -1,6 +1,6 @@
 [project]
 name = "com-starfall-betterday"
-version = "1.0.1"
+version = "1.0.2"
 description = "更好的一天 - Class Widgets 2 插件"
 authors = [
     {name = "落落"},
