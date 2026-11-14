@@ -27,12 +27,20 @@ except Exception:  # pragma: no cover - 没装 PySide6 时跳过
     HAS_QT = False
 
 if HAS_QT:
-    import pydantic
-
     import betterday_services as svc
     from test_services import WEATHER_FIXTURE, make_schedule
 
     # ---- 假的 ClassWidgets.SDK：接口和 CW2 运行时保持一致 ----
+    class _FakeConfigBaseModel:
+        """CW2 的 ConfigBaseModel 是 pydantic 模型；测试里用最小实现即可。"""
+
+        def __init__(self, **data):
+            for key, value in data.items():
+                setattr(self, key, value)
+
+        def model_dump(self):
+            return {key: value for key, value in self.__dict__.items() if not key.startswith("_")}
+
     class _FakeCW2Plugin(QObject):
         initialized = Signal()
 
@@ -53,7 +61,7 @@ if HAS_QT:
 
     _sdk = types.ModuleType("ClassWidgets.SDK")
     _sdk.CW2Plugin = _FakeCW2Plugin
-    _sdk.ConfigBaseModel = pydantic.BaseModel
+    _sdk.ConfigBaseModel = _FakeConfigBaseModel
     _sdk.PluginAPI = object
     _package = types.ModuleType("ClassWidgets")
     _package.__path__ = []
