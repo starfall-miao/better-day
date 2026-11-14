@@ -1,13 +1,24 @@
 import QtQuick
-import QtQuick.Window
 import QtQuick.Controls
 import QtQuick.Layouts
 import RinUI
 import ClassWidgets.Theme
 
-// 「更好的一天」小卡片：轮换展示内容（文字超长时慢速滚动）+ 详情按钮
+// 「更好的一天」小卡片：轮换展示天气 / 节日 / 黄历 / 课程，右侧 ⓘ 打开详情卡
 Widget {
     id: root
+
+    // ---------------- 数据代理（backend 可能还没就绪） ----------------
+    readonly property var nowWeather: (backend && backend.nowWeather) ? backend.nowWeather : ({})
+    readonly property var dailyWeather: (backend && backend.dailyWeather) ? backend.dailyWeather : []
+    readonly property var almanac: (backend && backend.almanac) ? backend.almanac : ({})
+    readonly property var course: (backend && backend.todayCourse) ? backend.todayCourse : ({})
+    readonly property var festivals: (backend && backend.upcomingFestivals) ? backend.upcomingFestivals : []
+    readonly property bool hasWeather: !!(backend && backend.hasWeather)
+    readonly property bool hasWarning: !!(backend && backend.hasWarning)
+    // 主题还没准备好时 Colors.proxy 可能还没有值，这里兜底成灰色
+    readonly property color dimColor: (Colors && Colors.proxy && Colors.proxy.textSecondaryColor)
+        ? Colors.proxy.textSecondaryColor : "#777777"
 
     // ---------------- 轮换配置 ----------------
     property int currentIndex: 0
@@ -18,6 +29,7 @@ Widget {
         if (!settings || settings.show_forecast !== false) arr.push("forecast")
         if (!settings || settings.show_festival !== false) arr.push("festival")
         if (!settings || settings.show_almanac !== false) arr.push("almanac")
+        if (settings && settings.show_course === true) arr.push("course")
         if (arr.length === 0) arr = ["now"]
         return arr
     }
@@ -25,11 +37,13 @@ Widget {
     property string currentKey: items.length > 0 ? items[currentIndex % items.length] : "now"
 
     property int viewIndex: {
+        // 视图顺序固定为 现在 / 将来 / 节日 / 黄历 / 课程
         switch (currentKey) {
         case "now": return 0
         case "forecast": return 1
         case "festival": return 2
         case "almanac": return 3
+        case "course": return 4
         default: return 0
         }
     }
@@ -37,7 +51,8 @@ Widget {
     Timer {
         id: rotateTimer
         interval: (settings && settings.rotation_seconds ? settings.rotation_seconds : 10) * 1000
-        running: true
+        // 指针停在卡片上时暂停轮换，方便把内容看完
+        running: !root.hovered
         repeat: true
         onTriggered: {
             if (root.items.length > 1)
@@ -53,13 +68,13 @@ Widget {
         StackLayout {
             id: contentStack
             currentIndex: root.viewIndex
-            Layout.maximumWidth: 178
+            Layout.maximumWidth: 186
 
             // ---- 0. 现在天气 ----
             RowLayout {
                 spacing: 6
                 Text {
-                    text: (backend && backend.nowWeather.emoji) ? backend.nowWeather.emoji : "🌡️"
+                    text: root.nowWeather.emoji ? root.nowWeather.emoji : "🌡️"
                     font.pixelSize: 18
                 }
                 ColumnLayout {
@@ -69,9 +84,11 @@ Widget {
                         maximumWidth: 138
                         font.pixelSize: 15
                         speed: 40
-                        text: (backend && backend.nowWeather.temp !== undefined && backend.nowWeather.temp !== null)
-                            ? (backend.nowWeather.temp + "° " + (backend.nowWeather.text || ""))
-                            : ((backend && backend.statusText) ? backend.statusText : qsTr("天气加载中…"))
+                        text: {
+                            if (root.hasWeather)
+                                return root.nowWeather.temp + "° " + (root.nowWeather.text || "")
+                            return (backend && backend.statusText) ? backend.statusText : qsTr("天气加载中…")
+                        }
                     }
                     Text {
                         Layout.maximumWidth: 138
@@ -80,7 +97,14 @@ Widget {
                         maximumLineCount: 1
                         font.pixelSize: 12
                         opacity: 0.6
-                        text: (backend && backend.locationName) ? backend.locationName : qsTr("现在天气")
+                        color: root.hasWarning ? "#D96A32" : root.dimColor
+                        text: {
+                            if (root.hasWarning)
+                                return "⚠️ " + (root.nowWeather.warning.title || qsTr("气象预警"))
+                            if (backend && backend.locationName)
+                                return backend.locationName
+                            return qsTr("现在天气")
+                        }
                     }
                 }
             }
@@ -89,8 +113,8 @@ Widget {
             RowLayout {
                 spacing: 6
                 Text {
-                    text: (backend && backend.dailyWeather && backend.dailyWeather.length > 1 && backend.dailyWeather[1].emoji)
-                        ? backend.dailyWeather[1].emoji : "🌤️"
+                    text: (root.dailyWeather.length > 1 && root.dailyWeather[1].emoji)
+                        ? root.dailyWeather[1].emoji : "🌤️"
                     font.pixelSize: 18
                 }
                 ColumnLayout {
@@ -100,9 +124,9 @@ Widget {
                         maximumWidth: 138
                         font.pixelSize: 15
                         speed: 40
-                        text: (backend && backend.dailyWeather && backend.dailyWeather.length > 1)
-                            ? (qsTr("明天 ") + (backend.dailyWeather[1].text || ""))
-                            : qsTr("天气加载中…")
+                        text: (root.dailyWeather.length > 1)
+                            ? (qsTr("明天 ") + (root.dailyWeather[1].text || ""))
+                            : (root.hasWeather ? qsTr("明天天气还没出来") : qsTr("天气加载中…"))
                     }
                     Text {
                         Layout.maximumWidth: 138
@@ -111,9 +135,10 @@ Widget {
                         maximumLineCount: 1
                         font.pixelSize: 12
                         opacity: 0.6
-                        text: (backend && backend.dailyWeather && backend.dailyWeather.length > 1
-                               && backend.dailyWeather[1].tempMin !== null && backend.dailyWeather[1].tempMin !== undefined)
-                            ? (backend.dailyWeather[1].tempMin + "~" + backend.dailyWeather[1].tempMax + "°")
+                        color: root.dimColor
+                        text: (root.dailyWeather.length > 1
+                               && root.dailyWeather[1].tempMin !== null && root.dailyWeather[1].tempMin !== undefined)
+                            ? (root.dailyWeather[1].tempMin + "~" + root.dailyWeather[1].tempMax + "°")
                             : qsTr("明日天气")
                     }
                 }
@@ -134,11 +159,13 @@ Widget {
                         font.pixelSize: 15
                         speed: 40
                         text: {
-                            var al = (backend && backend.almanac) ? backend.almanac : {}
+                            var al = root.almanac
                             var names = (al.festivals || []).slice()
                             if (al.legalHoliday) names.push(al.legalHoliday)
                             if (al.jieqi) names.push(al.jieqi)
                             if (names.length > 0) return names[0]
+                            var up = root.festivals
+                            if (up.length > 0) return up[0].name
                             if (al.nextJieQi) return al.nextJieQi
                             return qsTr("今天没有节日")
                         }
@@ -150,9 +177,18 @@ Widget {
                         maximumLineCount: 1
                         font.pixelSize: 12
                         opacity: 0.6
+                        color: root.dimColor
                         text: {
-                            var al = (backend && backend.almanac) ? backend.almanac : {}
-                            if (al.lunarMonth && al.lunarDay) return al.lunarMonth + "月" + al.lunarDay
+                            var al = root.almanac
+                            var names = (al.festivals || []).slice()
+                            if (al.legalHoliday) names.push(al.legalHoliday)
+                            if (names.length === 0 && al.jieqi) names.push(al.jieqi)
+                            var up = root.festivals
+                            // 今天有节日就显示农历日期，否则显示最近的节日倒计时
+                            if (names.length > 0)
+                                return al.lunarMonthDay || qsTr("今日节日")
+                            if (up.length > 0)
+                                return up[0].name + " · " + (up[0].daysLeft === 1 ? qsTr("明天") : (up[0].daysLeft + qsTr(" 天后")))
                             return qsTr("今日节日")
                         }
                     }
@@ -173,11 +209,9 @@ Widget {
                         maximumWidth: 138
                         font.pixelSize: 15
                         speed: 40
-                        text: {
-                            var al = (backend && backend.almanac) ? backend.almanac : {}
-                            if (al.lunarMonth && al.lunarDay) return al.lunarMonth + "月" + al.lunarDay
-                            return qsTr("黄历加载中…")
-                        }
+                        text: root.almanac.lunarMonthDay
+                            ? root.almanac.lunarMonthDay
+                            : qsTr("黄历加载中…")
                     }
                     Text {
                         Layout.maximumWidth: 138
@@ -186,11 +220,46 @@ Widget {
                         maximumLineCount: 1
                         font.pixelSize: 12
                         opacity: 0.6
+                        color: root.dimColor
                         text: {
-                            var al = (backend && backend.almanac) ? backend.almanac : {}
+                            var al = root.almanac
                             if (al.yi && al.yi.length > 0) return qsTr("宜 ") + al.yi.slice(0, 3).join("·")
                             if (al.ganzhiDay) return al.ganzhiDay
                             return qsTr("今日黄历")
+                        }
+                    }
+                }
+            }
+
+            // ---- 4. 课程（可在小卡片设置里打开） ----
+            RowLayout {
+                spacing: 6
+                Text {
+                    text: "📚"
+                    font.pixelSize: 18
+                }
+                ColumnLayout {
+                    spacing: 0
+                    MarqueeTitle {
+                        Layout.maximumWidth: 138
+                        maximumWidth: 138
+                        font.pixelSize: 15
+                        speed: 40
+                        text: root.course.title ? root.course.title : qsTr("今天没有课")
+                    }
+                    Text {
+                        Layout.maximumWidth: 138
+                        width: 138
+                        elide: Text.ElideRight
+                        maximumLineCount: 1
+                        font.pixelSize: 12
+                        opacity: 0.6
+                        color: root.dimColor
+                        text: {
+                            var c = root.course
+                            if (!c.title) return c.subtitle || qsTr("课表")
+                            var time = (c.startTime && c.endTime) ? (c.startTime + "-" + c.endTime) : ""
+                            return c.subtitle ? ((time ? time + " · " : "") + c.subtitle) : time
                         }
                     }
                 }
@@ -203,6 +272,10 @@ Widget {
             implicitWidth: 22
             implicitHeight: 22
             onClicked: toggleDetail()
+            ToolTip {
+                text: qsTr("查看详情")
+                visible: parent.hovered
+            }
         }
     }
 

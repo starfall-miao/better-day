@@ -1,8 +1,8 @@
 {
   "id": "com.starfall.betterday",
   "name": "更好的一天",
-  "version": "1.0.2",
-  "api_version": "~=0.6.0",
+  "version": "1.1.0",
+  "api_version": ">=0.6.0,<1.0.0",
   "entry": "main.py",
   "author": "落落",
   "description": "把天气、节日、黄历、课程表和每日一言，都装进你桌面的一张可爱小卡片里。",

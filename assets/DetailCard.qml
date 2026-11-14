@@ -11,25 +11,63 @@ Window {
     id: root
     flags: Qt.FramelessWindowHint | Qt.Window | Qt.WindowStaysOnTopHint | Qt.Tool
     color: "transparent"
-    width: 400
-    height: 560
+    width: 420
+    height: 620
     visible: false
 
     property var backend: null
 
-    readonly property color textColor: Colors.proxy.textColor
-    readonly property color dimColor: Colors.proxy.textSecondaryColor
-    readonly property color accentColor: Colors.proxy.primaryColor
+    // 主题还没准备好时 Colors.proxy 可能还没有值，这里兜底
+    readonly property color textColor: (Colors && Colors.proxy && Colors.proxy.textColor)
+        ? Colors.proxy.textColor : (Theme.isDark() ? "#F2F2F2" : "#202020")
+    readonly property color dimColor: (Colors && Colors.proxy && Colors.proxy.textSecondaryColor)
+        ? Colors.proxy.textSecondaryColor : (Theme.isDark() ? "#A0A0A0" : "#6A6A6A")
+    readonly property color accentColor: (Colors && Colors.proxy && Colors.proxy.primaryColor)
+        ? Colors.proxy.primaryColor : "#4C8DDB"
+    readonly property bool dark: Theme.isDark()
 
-    // 日历状态
+    // ---- 数据代理 ----
+    readonly property var nowWeather: (backend && backend.nowWeather) ? backend.nowWeather : ({})
+    readonly property var dailyWeather: (backend && backend.dailyWeather) ? backend.dailyWeather : []
+    readonly property var trend: (backend && backend.hourlyTrend) ? backend.hourlyTrend : ({})
+    readonly property var trendPoints: trend.points ? trend.points : []
+    readonly property var trendSummary: trend.summary ? trend.summary : ({})
+    readonly property var almanac: (backend && backend.almanac) ? backend.almanac : ({})
+    readonly property var festivals: (backend && backend.upcomingFestivals) ? backend.upcomingFestivals : []
+    readonly property var schedule: (backend && backend.weekSchedule) ? backend.weekSchedule : ({})
+    readonly property var quoteData: (backend && backend.quote) ? backend.quote : ({})
+    readonly property bool warningVisible: !!(nowWeather.warning && (!backend || backend.showWarning))
+
+    // ---- 日历状态 ----
     property int calYear: 0
     property int calMonth: 0
     property var calDays: []
-    property int leadingBlanks: calDays.length > 0 ? calDays[0].weekday : 0
+    readonly property int leadingBlanks: calDays.length > 0 ? calDays[0].weekday : 0
 
     function loadCalendar() {
-        if (backend && calYear > 0 && calMonth > 0)
-            calDays = backend.calendar(calYear, calMonth)
+        if (backend && calYear > 0 && calMonth > 0) {
+            var days = backend.calendar(calYear, calMonth)
+            calDays = days ? days : []
+        } else {
+            calDays = []
+        }
+    }
+
+    function shiftMonth(delta) {
+        var month = calMonth + delta
+        var year = calYear
+        while (month < 1) { month += 12; year -= 1 }
+        while (month > 12) { month -= 12; year += 1 }
+        calYear = year
+        calMonth = month
+        loadCalendar()
+    }
+
+    function goToday() {
+        var now = new Date()
+        calYear = now.getFullYear()
+        calMonth = now.getMonth() + 1
+        loadCalendar()
     }
 
     function screenAt(x, y) {
@@ -42,14 +80,15 @@ Window {
     }
 
     function openNear(ax, ay, aw, ah) {
+        goToday()
         var s = screenAt(ax, ay)
         var x = ax
-        var y = ay + ah + 8  // 默认显示在小卡片下方，左对齐
+        var y = ay + ah + 8 // 默认显示在小卡片下方，左对齐
 
         if (y + root.height > s.virtualY + s.height - 8)
-            y = ay - root.height - 8  // 放不下就翻到上方
+            y = ay - root.height - 8 // 放不下就翻到上方
         if (x + root.width > s.virtualX + s.width - 8)
-            x = ax + aw - root.width  // 右侧放不下就右对齐
+            x = ax + aw - root.width // 右侧放不下就右对齐
 
         x = Math.max(s.virtualX + 8, Math.min(s.virtualX + s.width - root.width - 8, x))
         y = Math.max(s.virtualY + 8, Math.min(s.virtualY + s.height - root.height - 8, y))
@@ -61,21 +100,22 @@ Window {
 
     function close() { root.visible = false }
 
-    Component.onCompleted: {
-        var now = new Date()
-        calYear = now.getFullYear()
-        calMonth = now.getMonth() + 1
-        loadCalendar()
+    Shortcut {
+        sequence: "Escape"
+        enabled: root.visible
+        onActivated: root.close()
     }
+
+    Component.onCompleted: goToday()
 
     // ---------------- 卡片外壳（不透明、可拖动） ----------------
     Rectangle {
         id: shell
         anchors.fill: parent
         radius: 14
-        color: Theme.isDark() ? "#242329" : "#F7F6FB"
+        color: root.dark ? "#242329" : "#F7F6FB"
         border.width: 1
-        border.color: Theme.isDark() ? Qt.alpha("#ffffff", 0.16) : Qt.alpha("#ffffff", 0.9)
+        border.color: root.dark ? Qt.alpha("#ffffff", 0.16) : Qt.alpha("#ffffff", 0.9)
         clip: true
 
         ColumnLayout {
@@ -92,17 +132,36 @@ Window {
                     text: qsTr("更好的一天")
                 }
                 Text {
-                    text: (backend && backend.locationName) ? backend.locationName : ""
+                    Layout.fillWidth: true
+                    elide: Text.ElideRight
                     color: root.dimColor
                     font.pixelSize: 12
-                    elide: Text.ElideRight
-                    Layout.fillWidth: true
+                    text: {
+                        var parts = []
+                        if (backend && backend.locationName) parts.push(backend.locationName)
+                        if (backend && backend.lastUpdated) parts.push(qsTr("更新于 ") + backend.lastUpdated)
+                        return parts.join(" · ")
+                    }
+                }
+                ToolButton {
+                    icon.name: "ic_fluent_arrow_sync_20_regular"
+                    implicitWidth: 26
+                    implicitHeight: 26
+                    onClicked: { if (backend) backend.refreshAll() }
+                    ToolTip {
+                        text: qsTr("刷新全部")
+                        visible: parent.hovered
+                    }
                 }
                 ToolButton {
                     icon.name: "ic_fluent_dismiss_20_regular"
                     implicitWidth: 26
                     implicitHeight: 26
                     onClicked: root.close()
+                    ToolTip {
+                        text: qsTr("关闭")
+                        visible: parent.hovered
+                    }
                 }
 
                 DragHandler {
@@ -123,6 +182,7 @@ Window {
 
             // ---- 单面板滚动内容（所有卡片堆叠）----
             Flickable {
+                id: panelFlick
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 clip: true
@@ -140,12 +200,15 @@ Window {
                     Rectangle {
                         width: parent.width
                         radius: 12
-                        color: Theme.isDark() ? Qt.alpha("#ffffff", 0.06) : Qt.alpha("#000000", 0.035)
+                        height: weatherColumn.height + 28
+                        color: root.dark ? Qt.alpha("#ffffff", 0.06) : Qt.alpha("#000000", 0.035)
+
                         Column {
+                            id: weatherColumn
                             width: parent.width - 24
                             anchors.horizontalCenter: parent.horizontalCenter
-                            topPadding: 14
-                            bottomPadding: 14
+                            anchors.top: parent.top
+                            anchors.topMargin: 14
                             spacing: 10
 
                             // 当前天气
@@ -153,57 +216,201 @@ Window {
                                 width: parent.width
                                 spacing: 12
                                 Text {
-                                    text: (backend && backend.nowWeather.emoji) ? backend.nowWeather.emoji : "🌡️"
+                                    text: root.nowWeather.emoji ? root.nowWeather.emoji : "🌡️"
                                     font.pixelSize: 40
                                 }
                                 Column {
-                                    spacing: 0
+                                    spacing: 2
                                     Title {
                                         px: 26
-                                        text: (backend && backend.nowWeather.temp !== undefined && backend.nowWeather.temp !== null)
-                                            ? (backend.nowWeather.temp + "°  " + (backend.nowWeather.text || ""))
+                                        text: (root.nowWeather.temp !== undefined && root.nowWeather.temp !== null)
+                                            ? (root.nowWeather.temp + "°  " + (root.nowWeather.text || ""))
                                             : ((backend && backend.statusText) ? backend.statusText : qsTr("加载中…"))
                                     }
                                     Text {
                                         color: root.dimColor
                                         font.pixelSize: 12
+                                        width: Math.max(0, panelColumn.width - 100)
+                                        wrapMode: Text.WordWrap
                                         text: {
-                                            var n = (backend && backend.nowWeather) ? backend.nowWeather : {}
+                                            var n = root.nowWeather
                                             var parts = []
-                                            if (n.feelsLike !== undefined && n.feelsLike !== null) parts.push(qsTr("体感 ") + n.feelsLike + "°")
-                                            if (n.humidity !== undefined && n.humidity !== null) parts.push(qsTr("湿度 ") + n.humidity + "%")
+                                            if (n.feelsLike !== undefined && n.feelsLike !== null)
+                                                parts.push(qsTr("体感 ") + n.feelsLike + "°")
+                                            if (n.humidity !== undefined && n.humidity !== null)
+                                                parts.push(qsTr("湿度 ") + n.humidity + "%")
                                             if (n.wind) parts.push(n.wind)
-                                            if (n.aqi !== undefined && n.aqi !== null) parts.push(qsTr("空气 ") + (n.aqiCategory || "") + " " + n.aqi)
+                                            if (n.aqi !== undefined && n.aqi !== null)
+                                                parts.push(qsTr("空气 ") + (n.aqiCategory || "") + " " + n.aqi)
                                             return parts.join(" · ")
+                                        }
+                                    }
+                                    Text {
+                                        color: root.dimColor
+                                        font.pixelSize: 12
+                                        text: {
+                                            var n = root.nowWeather
+                                            var parts = []
+                                            if (n.sunrise) parts.push("🌅 " + n.sunrise)
+                                            if (n.sunset) parts.push("🌇 " + n.sunset)
+                                            return parts.join("    ")
                                         }
                                     }
                                 }
                             }
 
-                            Rectangle { width: parent.width; height: 1; color: Theme.isDark() ? Qt.alpha("#fff", 0.08) : Qt.alpha("#000", 0.06) }
+                            // 气象预警
+                            Rectangle {
+                                width: parent.width
+                                height: warningColumn.height + 16
+                                radius: 8
+                                visible: root.warningVisible
+                                color: root.dark ? Qt.alpha("#E8A33D", 0.22) : Qt.alpha("#E8A33D", 0.16)
+
+                                Column {
+                                    id: warningColumn
+                                    width: parent.width - 16
+                                    anchors.centerIn: parent
+                                    spacing: 2
+                                    Text {
+                                        width: parent.width
+                                        wrapMode: Text.WordWrap
+                                        color: root.textColor
+                                        font.pixelSize: 12
+                                        font.weight: 700
+                                        text: {
+                                            var w = root.nowWeather.warning
+                                            return w ? ("⚠️ " + (w.title || qsTr("气象预警"))) : ""
+                                        }
+                                    }
+                                    Text {
+                                        width: parent.width
+                                        wrapMode: Text.WordWrap
+                                        color: root.textColor
+                                        font.pixelSize: 12
+                                        visible: !!((root.nowWeather.warning || {}).content)
+                                        text: (root.nowWeather.warning || {}).content || ""
+                                    }
+                                }
+                            }
+
+                            Rectangle { width: parent.width; height: 1; color: root.dark ? Qt.alpha("#fff", 0.08) : Qt.alpha("#000", 0.06) }
+
+                            // 过去 24 小时温度走势
+                            Column {
+                                width: parent.width
+                                spacing: 4
+                                visible: root.trendPoints.length > 1
+                                Row {
+                                    width: parent.width
+                                    Text {
+                                        text: qsTr("过去 24 小时")
+                                        color: root.dimColor
+                                        font.pixelSize: 12
+                                    }
+                                    Item { width: Math.max(0, parent.width - 190); height: 1 }
+                                    Text {
+                                        width: 120
+                                        horizontalAlignment: Text.AlignRight
+                                        color: root.dimColor
+                                        font.pixelSize: 12
+                                        text: (root.trendSummary.min !== null && root.trendSummary.min !== undefined)
+                                            ? (root.trendSummary.min + "° ~ " + root.trendSummary.max + "°")
+                                            : ""
+                                    }
+                                }
+                                Row {
+                                    id: trendRow
+                                    width: parent.width
+                                    height: 44
+                                    spacing: 1
+                                    Repeater {
+                                        model: root.trendPoints
+                                        delegate: Item {
+                                            width: Math.max(1, (trendRow.width - Math.max(0, root.trendPoints.length - 1) * trendRow.spacing)
+                                                           / Math.max(1, root.trendPoints.length))
+                                            height: trendRow.height
+                                            Rectangle {
+                                                anchors.bottom: parent.bottom
+                                                width: parent.width
+                                                radius: 2
+                                                height: 4 + (modelData.ratio || 0) * (trendRow.height - 8)
+                                                color: Qt.alpha(root.accentColor, 0.35 + (modelData.ratio || 0) * 0.55)
+                                            }
+                                        }
+                                    }
+                                }
+                                Row {
+                                    width: parent.width
+                                    Text {
+                                        text: root.trendPoints.length > 0 ? root.trendPoints[0].timeShort : ""
+                                        color: root.dimColor
+                                        font.pixelSize: 10
+                                    }
+                                    Item { width: Math.max(0, parent.width - 80); height: 1 }
+                                    Text {
+                                        width: 60
+                                        horizontalAlignment: Text.AlignRight
+                                        text: root.trendPoints.length > 0
+                                            ? root.trendPoints[root.trendPoints.length - 1].timeShort : ""
+                                        color: root.dimColor
+                                        font.pixelSize: 10
+                                    }
+                                }
+                            }
+
+                            Rectangle { width: parent.width; height: 1; color: root.dark ? Qt.alpha("#fff", 0.08) : Qt.alpha("#000", 0.06) }
 
                             // 7 日预报表格
                             Row {
                                 width: parent.width
-                                Text { width: 40; text: qsTr("日期"); color: root.dimColor; font.pixelSize: 12 }
-                                Text { width: 86; text: qsTr("天气"); color: root.dimColor; font.pixelSize: 12 }
-                                Text { width: 74; text: qsTr("温度"); color: root.dimColor; font.pixelSize: 12 }
-                                Text { width: 96; text: qsTr("风"); color: root.dimColor; font.pixelSize: 12 }
+                                Text { width: 58; text: qsTr("日期"); color: root.dimColor; font.pixelSize: 12 }
+                                Text { width: 92; text: qsTr("天气"); color: root.dimColor; font.pixelSize: 12 }
+                                Text { width: 78; text: qsTr("温度"); color: root.dimColor; font.pixelSize: 12 }
+                                Text { width: 80; text: qsTr("风"); color: root.dimColor; font.pixelSize: 12 }
+                                Text { width: 44; text: qsTr("降水"); color: root.dimColor; font.pixelSize: 12 }
                             }
                             Repeater {
-                                model: (backend && backend.dailyWeather) ? backend.dailyWeather : []
+                                model: root.dailyWeather
                                 delegate: Row {
-                                    width: panelColumn.width - 24
-                                    spacing: 0
-                                    Text { width: 40; text: modelData.weekday || modelData.date || ""; color: root.textColor; font.pixelSize: 13 }
-                                    Text { width: 86; elide: Text.ElideRight; text: (modelData.emoji ? modelData.emoji + " " : "") + (modelData.text || ""); color: root.textColor; font.pixelSize: 13 }
+                                    width: Math.max(0, panelColumn.width - 24)
+                                    height: 22
                                     Text {
-                                        width: 74
-                                        text: (modelData.tempMin !== undefined && modelData.tempMax !== undefined && modelData.tempMin !== null && modelData.tempMax !== null)
-                                            ? (modelData.tempMin + "~" + modelData.tempMax + "°") : ""
-                                        color: root.textColor; font.pixelSize: 13
+                                        width: 58
+                                        text: (modelData.isToday ? qsTr("今天") : (modelData.label || modelData.weekday))
+                                        color: modelData.isToday ? root.accentColor : root.textColor
+                                        font.pixelSize: 13
+                                        font.weight: modelData.isToday ? 700 : 400
                                     }
-                                    Text { width: 96; elide: Text.ElideRight; text: modelData.wind || ""; color: root.dimColor; font.pixelSize: 12 }
+                                    Text {
+                                        width: 92
+                                        elide: Text.ElideRight
+                                        text: (modelData.emoji ? modelData.emoji + " " : "") + (modelData.text || "")
+                                        color: root.textColor
+                                        font.pixelSize: 13
+                                    }
+                                    Text {
+                                        width: 78
+                                        text: (modelData.tempMin !== undefined && modelData.tempMax !== undefined
+                                               && modelData.tempMin !== null && modelData.tempMax !== null)
+                                            ? (modelData.tempMin + "~" + modelData.tempMax + "°") : "—"
+                                        color: root.textColor
+                                        font.pixelSize: 13
+                                    }
+                                    Text {
+                                        width: 80
+                                        elide: Text.ElideRight
+                                        text: modelData.wind || ""
+                                        color: root.dimColor
+                                        font.pixelSize: 12
+                                    }
+                                    Text {
+                                        width: 44
+                                        text: (modelData.precipitation !== undefined && modelData.precipitation !== null
+                                               && modelData.precipitation > 0) ? (modelData.precipitation + "mm") : "—"
+                                        color: root.dimColor
+                                        font.pixelSize: 12
+                                    }
                                 }
                             }
                         }
@@ -213,37 +420,43 @@ Window {
                     Rectangle {
                         width: parent.width
                         radius: 12
-                        color: Theme.isDark() ? Qt.alpha("#ffffff", 0.06) : Qt.alpha("#000000", 0.035)
+                        height: calendarColumn.height + 28
+                        color: root.dark ? Qt.alpha("#ffffff", 0.06) : Qt.alpha("#000000", 0.035)
+
                         Column {
+                            id: calendarColumn
                             width: parent.width - 24
                             anchors.horizontalCenter: parent.horizontalCenter
-                            topPadding: 14
-                            bottomPadding: 14
+                            anchors.top: parent.top
+                            anchors.topMargin: 14
                             spacing: 8
 
                             RowLayout {
                                 width: parent.width
+                                spacing: 4
                                 ToolButton {
                                     icon.name: "ic_fluent_chevron_left_20_regular"
-                                    onClicked: {
-                                        calMonth -= 1
-                                        if (calMonth < 1) { calMonth = 12; calYear -= 1 }
-                                        loadCalendar()
-                                    }
+                                    implicitWidth: 30
+                                    implicitHeight: 30
+                                    onClicked: root.shiftMonth(-1)
                                 }
                                 Title {
                                     px: 18
                                     Layout.fillWidth: true
                                     horizontalAlignment: Text.AlignHCenter
-                                    text: calYear + qsTr(" 年 ") + calMonth + qsTr(" 月")
+                                    text: root.calYear + qsTr(" 年 ") + root.calMonth + qsTr(" 月")
+                                }
+                                Button {
+                                    text: qsTr("今天")
+                                    flat: true
+                                    implicitHeight: 28
+                                    onClicked: root.goToday()
                                 }
                                 ToolButton {
                                     icon.name: "ic_fluent_chevron_right_20_regular"
-                                    onClicked: {
-                                        calMonth += 1
-                                        if (calMonth > 12) { calMonth = 1; calYear += 1 }
-                                        loadCalendar()
-                                    }
+                                    implicitWidth: 30
+                                    implicitHeight: 30
+                                    onClicked: root.shiftMonth(1)
                                 }
                             }
 
@@ -269,17 +482,19 @@ Window {
                                 columns: 7
                                 spacing: 2
                                 Repeater {
-                                    model: leadingBlanks + calDays.length
+                                    model: root.leadingBlanks + root.calDays.length
                                     delegate: Rectangle {
                                         width: 38
                                         height: 38
                                         radius: 8
                                         color: {
-                                            var idx = index - leadingBlanks
+                                            var idx = index - root.leadingBlanks
                                             if (idx < 0) return "transparent"
-                                            var d = calDays[idx]
-                                            if (d && d.isToday) return Qt.alpha(root.accentColor, Theme.isDark() ? 0.32 : 0.18)
-                                            if (d && (d.festival || d.jieqi)) return Theme.isDark() ? Qt.alpha("#ffffff", 0.06) : Qt.alpha("#000000", 0.05)
+                                            var d = root.calDays[idx]
+                                            if (!d) return "transparent"
+                                            if (d.isToday) return Qt.alpha(root.accentColor, root.dark ? 0.32 : 0.18)
+                                            if (d.isHolidayRest) return root.dark ? Qt.alpha("#E86A6A", 0.22) : Qt.alpha("#E86A6A", 0.14)
+                                            if (d.festival || d.jieqi) return root.dark ? Qt.alpha("#ffffff", 0.06) : Qt.alpha("#000000", 0.05)
                                             return "transparent"
                                         }
                                         Text {
@@ -287,14 +502,14 @@ Window {
                                             anchors.topMargin: 3
                                             anchors.horizontalCenter: parent.horizontalCenter
                                             text: {
-                                                var idx = index - leadingBlanks
-                                                return idx < 0 ? "" : String(calDays[idx].solarDay)
+                                                var idx = index - root.leadingBlanks
+                                                return (idx < 0 || !root.calDays[idx]) ? "" : String(root.calDays[idx].solarDay)
                                             }
                                             font.pixelSize: 14
                                             color: {
-                                                var idx = index - leadingBlanks
-                                                if (idx < 0) return root.textColor
-                                                return (calDays[idx].weekday === 5 || calDays[idx].weekday === 6) ? "#D28B59" : root.textColor
+                                                var idx = index - root.leadingBlanks
+                                                if (idx < 0 || !root.calDays[idx]) return root.textColor
+                                                return root.calDays[idx].isWeekend ? "#D28B59" : root.textColor
                                             }
                                         }
                                         Text {
@@ -303,50 +518,119 @@ Window {
                                             anchors.horizontalCenter: parent.horizontalCenter
                                             width: 36
                                             elide: Text.ElideRight
+                                            horizontalAlignment: Text.AlignHCenter
                                             text: {
-                                                var idx = index - leadingBlanks
-                                                if (idx < 0) return ""
-                                                var d = calDays[idx]
-                                                return d.festival || d.jieqi || (d.solarDay === 1 ? d.lunarMonth : d.lunarDay)
+                                                var idx = index - root.leadingBlanks
+                                                if (idx < 0 || !root.calDays[idx]) return ""
+                                                var d = root.calDays[idx]
+                                                if (d.legalHoliday) return d.legalHoliday
+                                                return d.festival || d.jieqi || (d.solarDay === 1 ? d.lunarMonth + "月" : d.lunarDay)
                                             }
-                                            color: (function() {
-                                                var idx = index - leadingBlanks
-                                                if (idx >= 0 && calDays[idx] && (calDays[idx].festival || calDays[idx].jieqi))
+                                            color: {
+                                                var idx = index - root.leadingBlanks
+                                                if (idx >= 0 && root.calDays[idx] && (root.calDays[idx].festival || root.calDays[idx].jieqi))
                                                     return root.accentColor
                                                 return root.dimColor
-                                            })()
+                                            }
                                             font.pixelSize: 9
                                         }
                                     }
                                 }
                             }
 
-                            Rectangle { width: parent.width; height: 1; color: Theme.isDark() ? Qt.alpha("#fff", 0.08) : Qt.alpha("#000", 0.06) }
+                            Rectangle { width: parent.width; height: 1; color: root.dark ? Qt.alpha("#fff", 0.08) : Qt.alpha("#000", 0.06) }
 
                             // 今日黄历摘要
-                            property var al: (backend && backend.almanac) ? backend.almanac : {}
-                            Row {
+                            Column {
                                 width: parent.width
-                                spacing: 12
-                                Column {
-                                    spacing: 2
-                                    Text { text: al.lunarFull || qsTr("黄历加载中…"); color: root.textColor; font.pixelSize: 14; font.weight: 700 }
-                                    Text { text: [al.ganzhiYear, al.ganzhiDay, al.shengxiao].filter(function (x) { return x }).join(" · "); color: root.dimColor; font.pixelSize: 12 }
+                                spacing: 4
+                                Text {
+                                    text: root.almanac.lunarFull || qsTr("黄历加载中…")
+                                    color: root.textColor
+                                    font.pixelSize: 14
+                                    font.weight: 700
+                                }
+                                Text {
+                                    color: root.dimColor
+                                    font.pixelSize: 12
+                                    width: parent.width
+                                    wrapMode: Text.WordWrap
+                                    text: {
+                                        var al = root.almanac
+                                        var parts = [al.ganzhiYear, al.ganzhiMonth, al.ganzhiDay].filter(function (x) { return x })
+                                        var line = parts.join(" · ")
+                                        if (al.shengxiao) line += "   属" + al.shengxiao
+                                        if (al.chong) line += "   冲" + al.chong
+                                        if (al.sha) line += "   煞" + al.sha
+                                        if (al.zhixing) line += "   值" + al.zhixing
+                                        return line
+                                    }
+                                }
+                                Text {
+                                    width: parent.width
+                                    wrapMode: Text.WordWrap
+                                    color: root.textColor
+                                    font.pixelSize: 13
+                                    text: qsTr("宜 ") + ((root.almanac.yi || []).join("、") || "—")
+                                }
+                                Text {
+                                    width: parent.width
+                                    wrapMode: Text.WordWrap
+                                    color: root.textColor
+                                    font.pixelSize: 13
+                                    text: qsTr("忌 ") + ((root.almanac.ji || []).join("、") || "—")
+                                }
+                                Text {
+                                    color: root.dimColor
+                                    font.pixelSize: 12
+                                    width: parent.width
+                                    wrapMode: Text.WordWrap
+                                    visible: !!root.almanac.nextJieQi
+                                    text: {
+                                        var al = root.almanac
+                                        if (!al.nextJieQi) return ""
+                                        var days = al.daysToNextJieQi
+                                        var suffix = ""
+                                        if (days !== null && days !== undefined)
+                                            suffix = "（" + (days === 0 ? qsTr("今天") : (days + qsTr(" 天后"))) + "）"
+                                        return qsTr("下一节气：") + al.nextJieQi + suffix
+                                    }
                                 }
                             }
-                            Text {
+
+                            // 最近的节日
+                            Column {
                                 width: parent.width
-                                wrapMode: Text.WordWrap
-                                text: qsTr("宜 ") + (al.yi || []).join("、")
-                                color: root.textColor
-                                font.pixelSize: 13
-                            }
-                            Text {
-                                width: parent.width
-                                wrapMode: Text.WordWrap
-                                text: qsTr("忌 ") + (al.ji || []).join("、")
-                                color: root.textColor
-                                font.pixelSize: 13
+                                spacing: 4
+                                visible: root.festivals.length > 0
+                                Rectangle { width: parent.width; height: 1; color: root.dark ? Qt.alpha("#fff", 0.08) : Qt.alpha("#000", 0.06) }
+                                Text {
+                                    text: qsTr("最近的节日")
+                                    color: root.dimColor
+                                    font.pixelSize: 12
+                                }
+                                Repeater {
+                                    model: root.festivals.slice(0, 4)
+                                    delegate: Row {
+                                        width: calendarColumn.width
+                                        height: 20
+                                        Text {
+                                            width: Math.max(0, parent.width - 120)
+                                            elide: Text.ElideRight
+                                            text: modelData.name
+                                            color: root.textColor
+                                            font.pixelSize: 13
+                                        }
+                                        Text {
+                                            width: 120
+                                            horizontalAlignment: Text.AlignRight
+                                            text: modelData.dateShort + " · "
+                                                + (modelData.daysLeft === 1 ? qsTr("明天") : (modelData.daysLeft + qsTr(" 天后")))
+                                            color: root.dimColor
+                                            font.pixelSize: 12
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -355,43 +639,94 @@ Window {
                     Rectangle {
                         width: parent.width
                         radius: 12
-                        color: Theme.isDark() ? Qt.alpha("#ffffff", 0.06) : Qt.alpha("#000000", 0.035)
+                        height: scheduleColumn.height + 28
+                        color: root.dark ? Qt.alpha("#ffffff", 0.06) : Qt.alpha("#000000", 0.035)
+
                         Column {
+                            id: scheduleColumn
                             width: parent.width - 24
                             anchors.horizontalCenter: parent.horizontalCenter
-                            topPadding: 14
-                            bottomPadding: 14
+                            anchors.top: parent.top
+                            anchors.topMargin: 14
                             spacing: 6
 
-                            Text { text: qsTr("整周课表"); color: root.textColor; font.pixelSize: 14; font.weight: 700 }
+                            Row {
+                                width: parent.width
+                                Text {
+                                    text: qsTr("整周课表")
+                                    color: root.textColor
+                                    font.pixelSize: 14
+                                    font.weight: 700
+                                }
+                                Item { width: Math.max(0, parent.width - 220); height: 1 }
+                                Text {
+                                    width: 140
+                                    horizontalAlignment: Text.AlignRight
+                                    color: root.dimColor
+                                    font.pixelSize: 12
+                                    text: {
+                                        var s = root.schedule
+                                        if (!s.weekNumber) return ""
+                                        var cycle = (s.weekOfCycle && s.maxWeekCycle > 1)
+                                            ? qsTr("（轮换第 ") + s.weekOfCycle + qsTr(" 周）") : ""
+                                        return qsTr("第 ") + s.weekNumber + qsTr(" 周") + cycle
+                                    }
+                                }
+                            }
+
+                            Text {
+                                width: parent.width
+                                wrapMode: Text.WordWrap
+                                color: root.dimColor
+                                font.pixelSize: 12
+                                visible: !root.schedule.hasData
+                                text: qsTr("还没有读到课表数据。先在 Class Widgets 里添加课表，这里就会自动出现啦。")
+                            }
 
                             Flickable {
                                 width: parent.width
-                                height: Math.max(0, scheduleColumn.height)
+                                height: Math.min(340, Math.max(0, scheduleGrid.height))
                                 clip: true
-                                contentWidth: scheduleColumn.width + 4
-                                contentHeight: scheduleColumn.height
+                                visible: !!root.schedule.hasData
+                                contentWidth: scheduleGrid.width
+                                contentHeight: scheduleGrid.height
                                 boundsBehavior: Flickable.StopAtBounds
 
                                 Column {
-                                    id: scheduleColumn
+                                    id: scheduleGrid
                                     spacing: 3
 
                                     // 表头
                                     Row {
                                         id: scheduleHeader
-                                        spacing: 3
+                                        spacing: 2
                                         Rectangle {
-                                            width: 58; height: 24; radius: 6
+                                            width: 48; height: 28; radius: 6
                                             color: "transparent"
                                             Text { anchors.centerIn: parent; text: qsTr("节次"); color: root.dimColor; font.pixelSize: 11 }
                                         }
                                         Repeater {
-                                            model: (backend && backend.weekSchedule && backend.weekSchedule.days) ? backend.weekSchedule.days : []
+                                            model: root.schedule.days ? root.schedule.days : []
                                             delegate: Rectangle {
-                                                width: 44; height: 24; radius: 6
-                                                color: "transparent"
-                                                Text { anchors.centerIn: parent; text: modelData.dayName; color: root.dimColor; font.pixelSize: 11 }
+                                                width: 42; height: 28; radius: 6
+                                                color: modelData.isToday
+                                                    ? Qt.alpha(root.accentColor, root.dark ? 0.3 : 0.16) : "transparent"
+                                                Column {
+                                                    anchors.centerIn: parent
+                                                    spacing: -3
+                                                    Text {
+                                                        text: modelData.dayShort
+                                                        color: modelData.isToday ? root.accentColor : root.dimColor
+                                                        font.pixelSize: 11
+                                                        font.weight: modelData.isToday ? 700 : 400
+                                                    }
+                                                    Text {
+                                                        text: modelData.dateShort || ""
+                                                        color: root.dimColor
+                                                        font.pixelSize: 8
+                                                        visible: !!modelData.dateShort
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -399,34 +734,60 @@ Window {
                                     // 数据行
                                     Repeater {
                                         id: periodRows
-                                        model: (backend && backend.weekSchedule && backend.weekSchedule.periods) ? backend.weekSchedule.periods : []
+                                        model: root.schedule.periods ? root.schedule.periods : []
                                         delegate: Row {
                                             property int rowIndex: index
-                                            spacing: 3
+                                            spacing: 2
                                             Rectangle {
-                                                width: 58; height: 34; radius: 6
-                                                color: Theme.isDark() ? Qt.alpha("#ffffff", 0.04) : Qt.alpha("#000000", 0.03)
-                                                Text {
+                                                width: 48; height: 34; radius: 6
+                                                color: root.dark ? Qt.alpha("#ffffff", 0.04) : Qt.alpha("#000000", 0.03)
+                                                Column {
                                                     anchors.centerIn: parent
-                                                    text: modelData.start || ""
-                                                    color: root.dimColor
-                                                    font.pixelSize: 10
+                                                    spacing: -1
+                                                    Text {
+                                                        text: modelData.start || ""
+                                                        anchors.horizontalCenter: parent.horizontalCenter
+                                                        color: root.dimColor
+                                                        font.pixelSize: 10
+                                                    }
+                                                    Text {
+                                                        text: modelData.end || ""
+                                                        anchors.horizontalCenter: parent.horizontalCenter
+                                                        color: root.dimColor
+                                                        font.pixelSize: 9
+                                                        opacity: 0.7
+                                                    }
                                                 }
                                             }
                                             Repeater {
-                                                model: (backend && backend.weekSchedule && backend.weekSchedule.days) ? backend.weekSchedule.days : []
+                                                model: root.schedule.days ? root.schedule.days : []
                                                 delegate: Rectangle {
-                                                    width: 44; height: 34; radius: 6
-                                                    property var cell: (modelData && modelData.cells && modelData.cells.length > rowIndex) ? modelData.cells[rowIndex] : null
-                                                    color: (cell && cell.color) ? Qt.alpha(cell.color, Theme.isDark() ? 0.35 : 0.22) : "transparent"
+                                                    width: 42; height: 34; radius: 6
+                                                    property var cell: (modelData && modelData.cells && modelData.cells.length > rowIndex)
+                                                        ? modelData.cells[rowIndex] : null
+                                                    color: (cell && cell.color)
+                                                        ? Qt.alpha(cell.color, root.dark ? 0.35 : 0.22)
+                                                        : "transparent"
                                                     Text {
                                                         anchors.centerIn: parent
+                                                        width: 38
+                                                        elide: Text.ElideRight
+                                                        horizontalAlignment: Text.AlignHCenter
                                                         text: cell ? (cell.title || "") : ""
                                                         color: root.textColor
                                                         font.pixelSize: 11
-                                                        elide: Text.ElideRight
-                                                        width: 40
-                                                        horizontalAlignment: Text.AlignHCenter
+                                                    }
+                                                    HoverHandler { id: cellHover }
+                                                    ToolTip {
+                                                        visible: cellHover.hovered && !!cell
+                                                        text: {
+                                                            if (!cell) return ""
+                                                            var parts = [cell.title]
+                                                            if (cell.teacher) parts.push(cell.teacher)
+                                                            if (cell.location) parts.push(cell.location)
+                                                            if (cell.startTime) parts.push(cell.startTime + "-" + cell.endTime)
+                                                            return parts.filter(function (x) { return !!x }).join(" · ")
+                                                        }
                                                     }
                                                 }
                                             }
@@ -441,12 +802,15 @@ Window {
                     Rectangle {
                         width: parent.width
                         radius: 12
-                        color: Theme.isDark() ? Qt.alpha("#ffffff", 0.06) : Qt.alpha("#000000", 0.035)
+                        height: quoteColumn.height + 32
+                        color: root.dark ? Qt.alpha("#ffffff", 0.06) : Qt.alpha("#000000", 0.035)
+
                         Column {
+                            id: quoteColumn
                             width: parent.width - 24
                             anchors.horizontalCenter: parent.horizontalCenter
-                            topPadding: 16
-                            bottomPadding: 16
+                            anchors.top: parent.top
+                            anchors.topMargin: 16
                             spacing: 10
 
                             Text {
@@ -461,14 +825,14 @@ Window {
                                 width: parent.width
                                 horizontalAlignment: Text.AlignHCenter
                                 wrapMode: Text.WordWrap
-                                text: (backend && backend.quote && backend.quote.text) ? backend.quote.text : qsTr("正在为你摘一句悄悄话…")
+                                text: root.quoteData.text ? root.quoteData.text : qsTr("正在为你摘一句悄悄话…")
                             }
                             Text {
                                 width: parent.width
                                 horizontalAlignment: Text.AlignHCenter
-                                text: (backend && backend.quote && backend.quote.from) ? ("—— " + backend.quote.from) : ""
                                 color: root.dimColor
                                 font.pixelSize: 12
+                                text: root.quoteData.from ? ("—— " + root.quoteData.from) : ""
                             }
                             Button {
                                 anchors.horizontalCenter: parent.horizontalCenter
