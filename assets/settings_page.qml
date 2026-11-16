@@ -9,6 +9,7 @@ PluginPage {
     id: page
 
     readonly property var cityInfo: (backend && backend.cityMatch) ? backend.cityMatch : ({})
+    readonly property var dutyInfo: (backend && backend.duty) ? backend.duty : ({})
     readonly property var info: backend ? backend.diagnostics() : ({})
 
     function saveCity() {
@@ -139,6 +140,113 @@ PluginPage {
 
         SettingCard {
             Layout.fillWidth: true
+            icon.name: "ic_fluent_people_20_regular"
+            title: qsTr("灵动通知退让")
+            description: {
+                if (!info || !info.notificationWidget)
+                    return qsTr("检测到当前组件预设里没有「灵动通知」小组件，这项暂时不会生效")
+                return qsTr("灵动通知出现时，小卡片和详情卡会暂时让开，通知结束后自动回来")
+            }
+
+            Switch {
+                checked: backend ? backend.retreatOnNotify : true
+                onCheckedChanged: { if (backend) backend.retreatOnNotify = checked }
+            }
+        }
+
+        Text {
+            Layout.fillWidth: true
+            Layout.topMargin: 8
+            typography: Typography.BodyStrong
+            text: qsTr("值日生")
+        }
+
+        SettingCard {
+            Layout.fillWidth: true
+            icon.name: "ic_fluent_people_team_20_regular"
+            title: qsTr("值日名单")
+            description: qsTr("用顿号或逗号分隔，例如「小明、小红、小刚、小丽」；留空则不显示值日")
+
+            TextField {
+                id: dutyNamesField
+                Layout.fillWidth: true
+                placeholderText: qsTr("小明、小红、小刚")
+                text: backend ? backend.dutyNames : ""
+                onEditingFinished: {
+                    if (backend) backend.dutyNames = dutyNamesField.text
+                }
+            }
+        }
+
+        SettingCard {
+            Layout.fillWidth: true
+            icon.name: "ic_fluent_person_20_regular"
+            title: qsTr("每天几人")
+            description: qsTr("每组几个人一起值日（1 ~ 8 人）")
+
+            SpinBox {
+                id: dutyPerDaySpin
+                from: 1
+                to: 8
+                stepSize: 1
+                editable: true
+                onValueChanged: { if (backend) backend.dutyPerDay = dutyPerDaySpin.value }
+                Component.onCompleted: dutyPerDaySpin.value = backend ? backend.dutyPerDay : 2
+            }
+        }
+
+        SettingCard {
+            Layout.fillWidth: true
+            icon.name: "ic_fluent_calendar_arrow_repeat_20_regular"
+            title: qsTr("轮换方式")
+            description: qsTr("按周轮换（每周换一组）或按天轮换（每天换一组）")
+
+            ComboBox {
+                id: dutyCycleBox
+                width: 132
+                model: [qsTr("按周轮换"), qsTr("按天轮换")]
+                onActivated: {
+                    if (backend) backend.dutyCycle = (dutyCycleBox.currentIndex === 1) ? "day" : "week"
+                }
+                Component.onCompleted: {
+                    var cycle = backend ? backend.dutyCycle : "week"
+                    dutyCycleBox.currentIndex = (cycle === "day") ? 1 : 0
+                }
+            }
+        }
+
+        SettingCard {
+            Layout.fillWidth: true
+            icon.name: "ic_fluent_calendar_ltr_20_regular"
+            title: qsTr("起算日期")
+            description: qsTr("从哪一天开始轮换（留空则用第一次保存名单的那天，格式 2026-09-01）")
+
+            TextField {
+                id: dutyStartField
+                width: 150
+                placeholderText: qsTr("留空即可")
+                text: backend ? backend.dutyStartDate : ""
+                onEditingFinished: {
+                    if (backend) backend.dutyStartDate = dutyStartField.text
+                }
+            }
+        }
+
+        SettingCard {
+            Layout.fillWidth: true
+            icon.name: "ic_fluent_people_list_20_regular"
+            title: qsTr("今日值日")
+            description: {
+                if (!dutyInfo || !dutyInfo.enabled) return qsTr("还没有配置名单")
+                var parts = [dutyInfo.todayText || "—"]
+                if (dutyInfo.groupLabel) parts.push(dutyInfo.groupLabel)
+                if (dutyInfo.nextDateShort) parts.push(qsTr("下次 ") + dutyInfo.nextDateShort + " · " + (dutyInfo.nextText || ""))
+                return parts.join(" · ")
+            }
+        }
+
+        SettingCard {
+            Layout.fillWidth: true
             icon.name: "ic_fluent_arrow_clockwise_20_regular"
             title: qsTr("立即刷新")
             description: qsTr("天气、课表、黄历、一言一起重新拉一遍")
@@ -169,8 +277,11 @@ PluginPage {
             text: {
                 var count = info && info.cityCount ? info.cityCount : 0
                 var version = (backend && backend.version) ? (" v" + backend.version) : ""
-                return qsTr("天气来自中央气象台 nmc.cn（无需 API Key），一言来自 hitokoto，黄历由 lunar-python 本地计算。")
+                var source = (info && info.weatherSource) ? info.weatherSource : ""
+                return qsTr("天气来自中央气象台 nmc.cn，失败时自动切换到备用源 Open-Meteo（都不用 API Key）；")
+                    + qsTr("一言来自 hitokoto，黄历由 lunar-python 本地计算。")
                     + qsTr("内置 %1 座城市。").arg(count)
+                    + (source ? qsTr("当前数据源：") + source + "。" : "")
                     + qsTr("更好的一天") + version
             }
         }

@@ -74,6 +74,18 @@ SettingsLayout {
 
     SettingCard {
         Layout.fillWidth: true
+        icon.name: "ic_fluent_people_20_regular"
+        title: qsTr("值日生")
+        description: qsTr("显示今天值日生和下一次值日（名单在插件设置里配置）")
+
+        Switch {
+            onCheckedChanged: settings.show_duty = checked
+            Component.onCompleted: checked = settings.show_duty !== false
+        }
+    }
+
+    SettingCard {
+        Layout.fillWidth: true
         icon.name: "ic_fluent_book_open_20_regular"
         title: qsTr("课程")
         description: qsTr("显示当前正在上 / 下一节课（需要先在 Class Widgets 里配置课表）")

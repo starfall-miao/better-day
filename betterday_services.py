@@ -136,12 +136,14 @@ def _round(value, digits=0):
 
 
 def _short_hm(value):
-    """把 "2026-11-14 06:57" / "06:57" 统一成 "06:57"。"""
+    """把 "2026-11-14 06:57" / "2026-11-14T06:57" / "06:57" 统一成 "06:57"。"""
     text = clean_text(value)
     if not text:
         return ""
-    if " " in text:
-        text = text.split(" ", 1)[1]
+    for separator in (" ", "T"):
+        if separator in text:
+            text = text.split(separator, 1)[1]
+            break
     return text[:5]
 
 
@@ -513,12 +515,13 @@ def build_now_weather(data, now=None):
     }
 
 
-def build_daily_weather(data, limit=7):
+def build_daily_weather(data, limit=7, now=None):
     """整理 7 日预报，附带「今天 / 明天 / 后天」标签与日期简写。"""
     out = []
     detail = _forecast_detail(data)
-    today = datetime.now().date()
-    now_weather = build_now_weather(data)
+    now = now or datetime.now()
+    today = now.date()
+    now_weather = build_now_weather(data, now)
 
     for index, item in enumerate(detail[:limit]):
         day = item.get("day") or {}
@@ -613,6 +616,426 @@ def build_hourly_trend(data, limit=24):
         "points": points,
         "summary": {"min": low, "max": high, "last": points[-1]["temp"]},
     }
+
+
+# --------------------------------------------------------------------------
+# 备用数据源：Open-Meteo（全球可用、无需 API Key）
+#
+# 中央气象台偶尔会抽风 / 部分地区访问不到，这里用 Open-Meteo 兜底：
+# 先用中文城市名做地理编码，再取实况 + 7 日预报 + 逐小时温度。
+# --------------------------------------------------------------------------
+OPEN_METEO_GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
+OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+
+# WMO 天气代码 → 中文描述 / emoji
+WMO_WEATHER = {
+    0: ("晴", "☀️"),
+    1: ("少云", "🌤️"),
+    2: ("多云", "⛅"),
+    3: ("阴", "☁️"),
+    45: ("雾", "🌫️"),
+    48: ("雾凇", "🌫️"),
+    51: ("毛毛雨", "🌦️"),
+    53: ("毛毛雨", "🌦️"),
+    55: ("毛毛雨", "🌦️"),
+    56: ("冻毛毛雨", "🌧️"),
+    57: ("冻毛毛雨", "🌧️"),
+    61: ("小雨", "🌧️"),
+    63: ("中雨", "🌧️"),
+    65: ("大雨", "🌧️"),
+    66: ("冻雨", "🌧️"),
+    67: ("冻雨", "🌧️"),
+    71: ("小雪", "❄️"),
+    73: ("中雪", "❄️"),
+    75: ("大雪", "❄️"),
+    77: ("米雪", "❄️"),
+    80: ("阵雨", "🌦️"),
+    81: ("阵雨", "🌧️"),
+    82: ("强阵雨", "🌧️"),
+    85: ("阵雪", "🌨️"),
+    86: ("强阵雪", "🌨️"),
+    95: ("雷阵雨", "⛈️"),
+    96: ("雷阵雨伴冰雹", "⛈️"),
+    99: ("强雷阵雨伴冰雹", "⛈️"),
+}
+
+
+def wmo_text_emoji(code):
+    """WMO 天气代码 → (中文描述, emoji)。"""
+    try:
+        key = int(code)
+    except (TypeError, ValueError):
+        return ("", "🌡️")
+    return WMO_WEATHER.get(key, ("未知天气", "🌤️"))
+
+
+def _wind_direction_text(degrees):
+    """风向角度 → 中文方位。"""
+    try:
+        value = float(degrees)
+    except (TypeError, ValueError):
+        return ""
+    directions = ["北风", "东北风", "东风", "东南风", "南风", "西南风", "西风", "西北风"]
+    index = int((value % 360) / 45 + 0.5) % 8
+    return directions[index]
+
+
+def fetch_open_meteo(city, timeout=20):
+    """用 Open-Meteo 取一份天气（地理编码 + 实况 + 7 日预报 + 逐小时温度）。"""
+    name = clean_text(city)
+    if not name:
+        raise ValueError("城市名为空")
+    geo = http_get_json(
+        OPEN_METEO_GEOCODE_URL
+        + "?"
+        + urllib.parse.urlencode({"name": name, "count": 1, "language": "zh", "format": "json"}),
+        timeout=timeout,
+    )
+    results = (geo or {}).get("results") or []
+    if not results:
+        raise ValueError(f"备用源也找不到「{name}」")
+    place = results[0]
+    try:
+        latitude = float(place.get("latitude"))
+        longitude = float(place.get("longitude"))
+    except (TypeError, ValueError):
+        raise ValueError("备用源返回的经纬度不可用")
+
+    query = urllib.parse.urlencode(
+        {
+            "latitude": f"{latitude:.4f}",
+            "longitude": f"{longitude:.4f}",
+            "current": ",".join(
+                [
+                    "temperature_2m",
+                    "relative_humidity_2m",
+                    "apparent_temperature",
+                    "weather_code",
+                    "wind_speed_10m",
+                    "wind_direction_10m",
+                    "precipitation",
+                ]
+            ),
+            "daily": ",".join(
+                [
+                    "weather_code",
+                    "temperature_2m_max",
+                    "temperature_2m_min",
+                    "precipitation_sum",
+                    "wind_speed_10m_max",
+                    "wind_direction_10m_dominant",
+                    "sunrise",
+                    "sunset",
+                ]
+            ),
+            "hourly": "temperature_2m,precipitation",
+            "past_days": 1,
+            "forecast_days": 7,
+            "timezone": "Asia/Shanghai",
+        }
+    )
+    forecast = http_get_json(OPEN_METEO_FORECAST_URL + "?" + query, timeout=timeout)
+    return {"place": place, "forecast": forecast or {}}
+
+
+def build_open_meteo_bundle(city, raw, now=None):
+    """把 Open-Meteo 数据整理成与中央气象台一致的 now / daily / trend 结构。"""
+    now = now or datetime.now()
+    place = (raw or {}).get("place") or {}
+    forecast = (raw or {}).get("forecast") or {}
+    current = forecast.get("current") or {}
+    daily = forecast.get("daily") or {}
+    hourly = forecast.get("hourly") or {}
+
+    text, emoji = wmo_text_emoji(current.get("weather_code"))
+    wind_direct = _wind_direction_text(current.get("wind_direction_10m"))
+    wind_speed = to_number(current.get("wind_speed_10m"), invalid=1000)
+    wind_power = f"{round(wind_speed)} km/h" if wind_speed is not None else ""
+
+    def first_value(key):
+        values = daily.get(key) or []
+        return values[0] if values else None
+
+    sunrise = _short_hm(first_value("sunrise"))
+    sunset = _short_hm(first_value("sunset"))
+
+    now_payload = {
+        "temp": _round(to_number(current.get("temperature_2m"), invalid=1000)),
+        "feelsLike": _round(to_number(current.get("apparent_temperature"), invalid=1000)),
+        "humidity": _round(to_number(current.get("relative_humidity_2m"), invalid=1000)),
+        "rain": _round(to_number(current.get("precipitation"), invalid=1000), 1),
+        "tempDiff": None,
+        "wind": " ".join(part for part in (wind_direct, wind_power) if part),
+        "windDirect": wind_direct,
+        "windPower": wind_power,
+        "isDay": 6 <= now.hour < 18,
+        "text": text,
+        "nightText": "",
+        "emoji": emoji,
+        "aqi": None,
+        "aqiCategory": "",
+        "sunrise": sunrise,
+        "sunset": sunset,
+        "warning": None,
+        "reportTime": clean_text(current.get("time")),
+        "reportTimeShort": _short_hm(current.get("time")),
+    }
+
+    dates = daily.get("time") or []
+    codes = daily.get("weather_code") or []
+    highs = daily.get("temperature_2m_max") or []
+    lows = daily.get("temperature_2m_min") or []
+    rains = daily.get("precipitation_sum") or []
+    wind_dirs = daily.get("wind_direction_10m_dominant") or []
+    today = now.date()
+    daily_payload = []
+    for index, date_text in enumerate(dates[:7]):
+        try:
+            date_value = datetime.strptime(clean_text(date_text), "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            continue
+        day_text, day_emoji = wmo_text_emoji(codes[index] if index < len(codes) else None)
+        label = ""
+        if date_value == today:
+            label = "今天"
+        elif date_value == today + timedelta(days=1):
+            label = "明天"
+        elif date_value == today + timedelta(days=2):
+            label = "后天"
+        daily_payload.append(
+            {
+                "date": date_value.isoformat(),
+                "dateShort": date_value.strftime("%m-%d"),
+                "weekday": WEEKDAY_CN[date_value.weekday()],
+                "weekdayShort": WEEKDAY_SHORT[date_value.weekday()],
+                "label": label,
+                "text": day_text,
+                "nightText": "",
+                "emoji": day_emoji,
+                "nightEmoji": day_emoji,
+                "tempMax": _round(to_number(highs[index], invalid=1000)) if index < len(highs) else None,
+                "tempMin": _round(to_number(lows[index], invalid=1000)) if index < len(lows) else None,
+                "wind": _wind_direction_text(wind_dirs[index]) if index < len(wind_dirs) else "",
+                "precipitation": _round(to_number(rains[index], invalid=1000), 1) if index < len(rains) else None,
+                "isToday": date_value == today,
+            }
+        )
+
+    # 逐小时温度：取最近 24 个点
+    points = []
+    times = hourly.get("time") or []
+    temps = hourly.get("temperature_2m") or []
+    rains_hourly = hourly.get("precipitation") or []
+    for index, time_text in enumerate(times):
+        if index >= len(temps):
+            break
+        try:
+            stamp = datetime.strptime(clean_text(time_text), "%Y-%m-%dT%H:%M")
+        except (TypeError, ValueError):
+            continue
+        if stamp > now + timedelta(hours=1):
+            continue
+        temp = to_number(temps[index], invalid=1000)
+        if temp is None:
+            continue
+        points.append(
+            {
+                "time": stamp.strftime("%Y-%m-%d %H:%M"),
+                "timeShort": stamp.strftime("%H:%M"),
+                "temp": _round(temp, 1),
+                "rain": _round(to_number(rains_hourly[index], invalid=1000), 1)
+                if index < len(rains_hourly)
+                else None,
+                "humidity": None,
+                "windSpeed": None,
+            }
+        )
+    points = points[-24:]
+    trend = {"points": [], "summary": {"min": None, "max": None, "last": None}}
+    if points:
+        values = [point["temp"] for point in points]
+        low, high = min(values), max(values)
+        span = (high - low) or 1.0
+        for point in points:
+            point["ratio"] = round((point["temp"] - low) / span, 3)
+        trend = {"points": points, "summary": {"min": low, "max": high, "last": points[-1]["temp"]}}
+
+    return {
+        "now": now_payload,
+        "daily": daily_payload,
+        "trend": trend,
+        "place": {
+            "name": clean_text(place.get("name")) or clean_text(city),
+            "province": clean_text(place.get("admin1")) or "",
+            "country": clean_text(place.get("country")) or "",
+        },
+    }
+
+
+SOURCE_NMC = "中央气象台"
+SOURCE_OPEN_METEO = "Open-Meteo"
+
+
+def fetch_weather_bundle(city, now=None, timeout=20):
+    """统一取数入口：先中央气象台，失败再退到 Open-Meteo。
+
+    返回 {"resolved": {...}, "source": str, "now": dict, "daily": [...], "trend": {...}}
+    两个源都失败时抛 ValueError（message 里带两边的失败原因）。
+    """
+    now = now or datetime.now()
+    query = clean_text(city)
+    if not query:
+        raise ValueError("还没有设置城市")
+
+    resolved = resolve_city(query)
+    errors = []
+    if resolved:
+        try:
+            raw = fetch_weather_by_code(resolved["code"], timeout=timeout)
+            return {
+                "resolved": resolved,
+                "source": SOURCE_NMC,
+                "now": build_now_weather(raw, now),
+                "daily": build_daily_weather(raw, now=now),
+                "trend": build_hourly_trend(raw),
+            }
+        except Exception as error:  # noqa: BLE001
+            errors.append(f"{SOURCE_NMC}：{error}")
+    else:
+        errors.append(f"{SOURCE_NMC}：找不到「{query}」这座城市")
+
+    try:
+        raw = fetch_open_meteo(query, timeout=timeout)
+        bundle = build_open_meteo_bundle(query, raw, now)
+        place = bundle["place"]
+        return {
+            "resolved": {
+                "query": query,
+                "ok": True,
+                "code": "",
+                "name": place["name"],
+                "province": place["province"],
+                "message": f"已匹配 {place['province']}·{place['name']}"
+                if place["province"] and place["province"] != place["name"]
+                else f"已匹配 {place['name']}",
+                "alternatives": [],
+            },
+            "source": SOURCE_OPEN_METEO,
+            "now": bundle["now"],
+            "daily": bundle["daily"],
+            "trend": bundle["trend"],
+        }
+    except Exception as error:  # noqa: BLE001
+        errors.append(f"{SOURCE_OPEN_METEO}：{error}")
+
+    raise ValueError("；".join(errors))
+
+
+# --------------------------------------------------------------------------
+# 值日生：手动名单 + 轮换规则
+# --------------------------------------------------------------------------
+DUTY_CYCLE_WEEK = "week"
+DUTY_CYCLE_DAY = "day"
+DUTY_MAX_PER_DAY = 8
+
+
+def parse_duty_names(text):
+    """把「小明,小红 小明、小红」这类输入拆成名字列表。"""
+    raw = clean_text(text)
+    if not raw:
+        return []
+    for separator in ("、", "，", ";", "；", "/", "|", "\n", " "):
+        raw = raw.replace(separator, ",")
+    names = []
+    for part in raw.split(","):
+        name = part.strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _monday_of(day_value):
+    """取某天所在周的周一。"""
+    return day_value - timedelta(days=day_value.weekday())
+
+
+def build_duty(names_text, per_day=2, cycle=DUTY_CYCLE_WEEK, start_date="", now=None):
+    """按名单 + 轮换规则算出今天的值日生与下一次值日。
+
+    - per_day：每天几个人（1~8）
+    - cycle：DUTY_CYCLE_WEEK（按周轮换）/ DUTY_CYCLE_DAY（按天轮换）
+    - start_date：起算日期（yyyy-mm-dd，自动对齐到那一周的周一）；
+      留空则用本周一，保证「从今天开始轮换」
+    """
+    now = now or datetime.now()
+    today = now.date()
+    names = parse_duty_names(names_text)
+
+    result = {
+        "enabled": False,
+        "names": names,
+        "todayNames": [],
+        "todayText": "",
+        "nextDate": "",
+        "nextDateShort": "",
+        "nextNames": [],
+        "nextText": "",
+        "cycle": DUTY_CYCLE_DAY if cycle == DUTY_CYCLE_DAY else DUTY_CYCLE_WEEK,
+        "perDay": 1,
+        "groups": [],
+        "groupIndex": 0,
+        "groupCount": 0,
+        "groupLabel": "",
+    }
+    if not names:
+        return result
+
+    try:
+        per_day = int(per_day)
+    except (TypeError, ValueError):
+        per_day = 2
+    per_day = max(1, min(DUTY_MAX_PER_DAY, per_day))
+
+    # 切成每组 per_day 人（最后一组可能不满）
+    groups = [names[index : index + per_day] for index in range(0, len(names), per_day)]
+    groups = [group for group in groups if group]
+    if not groups:
+        return result
+
+    try:
+        start = datetime.strptime(clean_text(start_date), "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        start = today
+    start = _monday_of(start)
+
+    cycle = DUTY_CYCLE_DAY if cycle == DUTY_CYCLE_DAY else DUTY_CYCLE_WEEK
+    offset_days = (today - start).days
+    if cycle == DUTY_CYCLE_WEEK:
+        period_index = offset_days // 7
+        next_change = today + timedelta(days=7 - today.weekday())
+    else:
+        period_index = offset_days
+        next_change = today + timedelta(days=1)
+
+    group_index = period_index % len(groups)
+    next_index = (group_index + 1) % len(groups)
+
+    result.update(
+        enabled=True,
+        names=names,
+        todayNames=groups[group_index],
+        todayText="、".join(groups[group_index]),
+        nextDate=next_change.isoformat(),
+        nextDateShort=next_change.strftime("%m-%d"),
+        nextNames=groups[next_index],
+        nextText="、".join(groups[next_index]),
+        perDay=per_day,
+        groups=groups,
+        groupIndex=group_index,
+        groupCount=len(groups),
+        groupLabel=f"第 {group_index + 1} / {len(groups)} 组",
+    )
+    return result
 
 
 # --------------------------------------------------------------------------

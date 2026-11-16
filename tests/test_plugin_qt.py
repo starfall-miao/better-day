@@ -104,6 +104,33 @@ class _FakeSchedule:
         return self._schedule
 
 
+class _FakeNotification(QObject):
+    pushed = Signal(dict)
+
+    def __init__(self):
+        super().__init__()
+        self.providers = {}
+
+    def register_provider(self, *args, **kwargs):
+        return None
+
+
+class _FakePreferences:
+    def __init__(self, presets=None, current="默认"):
+        self.widgets_presets = presets if presets is not None else {}
+        self.current_preset = current
+
+
+class _FakeConfigManager:
+    def __init__(self, preferences):
+        self.preferences = preferences
+
+
+class _FakeGlobalConfig:
+    def __init__(self, preferences):
+        self.configs = _FakeConfigManager(preferences)
+
+
 class _FakeConfig:
     def __init__(self):
         self.registered = None
@@ -128,23 +155,56 @@ class _FakeUi:
         self.registered = kwargs
 
 
+class _FakeWidgetEntry:
+    def __init__(self, type_id):
+        self.type_id = type_id
+
+
 class _FakeAPI:
-    def __init__(self, schedule):
+    def __init__(self, schedule, with_notification_widget=True):
         self.config = _FakeConfig()
         self.widgets = _FakeWidgets()
         self.ui = _FakeUi()
         self.runtime = _FakeRuntime()
         self.schedule = _FakeSchedule(schedule)
+        self.notification = _FakeNotification()
+        entries = [_FakeWidgetEntry("classwidgets.dynamicNotification")] if with_notification_widget else []
+        entries.append(_FakeWidgetEntry("com.starfall.betterday"))
+        self.globalconfig = _FakeGlobalConfig(_FakePreferences({"默认": entries}, "默认"))
         self.current = None
 
     def set_current_plugin(self, plugin):
         self.current = plugin
 
 
+def make_weather_bundle(city, now=None, timeout=20):
+    """测试用的天气包：结构和服务层一致，避免联网。"""
+    from datetime import datetime as _dt
+
+    moment = now or _dt.now()
+    return {
+        "resolved": {
+            "query": city,
+            "ok": True,
+            "code": "Wqsps",
+            "name": city,
+            "province": "北京市",
+            "message": f"已匹配 北京市·{city}",
+            "alternatives": [],
+        },
+        "source": svc.SOURCE_NMC,
+        "now": svc.build_now_weather(WEATHER_FIXTURE, moment),
+        "daily": svc.build_daily_weather(WEATHER_FIXTURE, now=moment),
+        "trend": svc.build_hourly_trend(WEATHER_FIXTURE),
+    }
+
+
 @unittest.skipUnless(HAS_QT, "需要 PySide6 才能跑插件冒烟测试")
 class PluginSmokeTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        from PySide6.QtCore import QStandardPaths
+        QStandardPaths.setTestModeEnabled(True)
         cls.app = QCoreApplication.instance() or QCoreApplication([])
 
     @classmethod
@@ -154,11 +214,11 @@ class PluginSmokeTest(unittest.TestCase):
 
     def setUp(self):
         self._patched = {
-            "fetch_weather_by_code": svc.fetch_weather_by_code,
+            "fetch_weather_bundle": svc.fetch_weather_bundle,
             "fetch_quote": svc.fetch_quote,
             "upcoming_festivals": svc.upcoming_festivals,
         }
-        svc.fetch_weather_by_code = lambda code, timeout=20: WEATHER_FIXTURE
+        svc.fetch_weather_bundle = make_weather_bundle
         svc.fetch_quote = lambda category="", timeout=10: {"text": "今天也要开开心心的", "from": "更好的一天"}
         svc.upcoming_festivals = lambda now=None, horizon=45, limit=5: [
             {
@@ -299,10 +359,10 @@ class PluginSmokeTest(unittest.TestCase):
         self.assertTrue(self.pump(lambda: self.plugin.nowWeather.get("temp") is not None))
         self.assertTrue(self.pump(lambda: not self.plugin._weather_loading))
 
-        def boom(code, timeout=20):
-            raise ValueError("网络好像不太顺")
+        def boom(city, now=None, timeout=20):
+            raise ValueError("中央气象台：网络好像不太顺；Open-Meteo：也不太行")
 
-        svc.fetch_weather_by_code = boom
+        svc.fetch_weather_bundle = boom
         self.plugin.refreshWeather()
         self.assertTrue(self.pump(lambda: "失败" in self.plugin.statusText))
         # 失败时保留上一次成功的数据，不要把卡片清空
@@ -320,6 +380,122 @@ class PluginSmokeTest(unittest.TestCase):
         self.assertIsNone(self.plugin._weather_timer)
         self.assertIsNone(self.plugin._clock_timer)
         self.assertIsNone(self.plugin._day_timer)
+
+    # ------------------------------------------------------------------
+    # 灵动通知退让
+    # ------------------------------------------------------------------
+    def test_retreat_on_notification(self):
+        self.plugin.config.retreat_on_notify = True
+        self.api.notification.pushed.emit({"title": "上课铃", "duration": 800})
+        self.assertTrue(self.pump(lambda: self.plugin.retreatActive, timeout=1.0))
+        self.assertTrue(self.plugin.retreatActive)
+        # 通知时长 + 余量之后自动回来
+        self.assertTrue(self.pump(lambda: not self.plugin.retreatActive, timeout=4.0))
+        self.assertFalse(self.plugin.retreatActive)
+
+    def test_retreat_extends_with_more_notifications(self):
+        self.api.notification.pushed.emit({"title": "第一条", "duration": 600})
+        self.assertTrue(self.pump(lambda: self.plugin.retreatActive, timeout=1.0))
+        self.api.notification.pushed.emit({"title": "第二条", "duration": 900})
+        self.assertTrue(self.plugin.retreatActive)
+        self.assertTrue(self.pump(lambda: not self.plugin.retreatActive, timeout=5.0))
+
+    def test_no_retreat_without_notification_widget(self):
+        api = _FakeAPI(make_schedule(), with_notification_widget=False)
+        plugin = plugin_main.Plugin(api)
+        plugin.meta = {"id": "com.starfall.betterday", "version": "1.1.0"}
+        plugin.on_load()
+        try:
+            api.notification.pushed.emit({"title": "上课铃", "duration": 800})
+            self.pump(lambda: False, timeout=0.5)
+            self.assertFalse(plugin.retreatActive)
+        finally:
+            plugin.on_unload()
+
+    def test_retreat_can_be_disabled(self):
+        self.plugin.retreatOnNotify = False
+        self.assertFalse(self.plugin.retreatOnNotify)
+        self.api.notification.pushed.emit({"title": "上课铃", "duration": 800})
+        self.pump(lambda: False, timeout=0.5)
+        self.assertFalse(self.plugin.retreatActive)
+        self.plugin.retreatOnNotify = True
+        self.assertTrue(self.plugin.retreatOnNotify)
+
+    # ------------------------------------------------------------------
+    # 值日生
+    # ------------------------------------------------------------------
+    def test_duty_disabled_by_default(self):
+        self.assertFalse(self.plugin.duty["enabled"])
+        self.assertEqual(self.plugin.dutyNames, "")
+
+    def test_duty_rotation_and_start_date(self):
+        self.plugin.dutyNames = "小明、小红、小刚、小丽"
+        self.plugin.dutyPerDay = 2
+        self.plugin.dutyCycle = "week"
+        duty = self.plugin.duty
+        self.assertTrue(duty["enabled"])
+        self.assertEqual(duty["todayNames"], ["小明", "小红"])
+        self.assertEqual(duty["groupCount"], 2)
+        # 第一次保存名单时自动记录起算日期
+        self.assertTrue(self.plugin.dutyStartDate)
+
+        self.plugin.dutyStartDate = "2026-09-07"
+        self.assertEqual(self.plugin.duty["groupIndex"], 0)
+        # 起算日期往前推 7 天 → 轮到第二组
+        self.plugin.dutyStartDate = "2026-08-31"
+        self.assertEqual(self.plugin.duty["groupIndex"], 1)
+
+    def test_duty_cycle_validation(self):
+        self.plugin.dutyCycle = "乱填的"
+        self.assertEqual(self.plugin.dutyCycle, "week")
+        self.plugin.dutyCycle = "day"
+        self.assertEqual(self.plugin.dutyCycle, "day")
+        self.plugin.dutyPerDay = 99
+        self.assertEqual(self.plugin.dutyPerDay, svc.DUTY_MAX_PER_DAY)
+        self.plugin.dutyPerDay = 0
+        self.assertEqual(self.plugin.dutyPerDay, 1)
+
+    def test_clearing_names_disables_duty(self):
+        self.plugin.dutyNames = "小明、小红"
+        self.assertTrue(self.plugin.duty["enabled"])
+        self.plugin.dutyNames = ""
+        self.assertFalse(self.plugin.duty["enabled"])
+
+    # ------------------------------------------------------------------
+    # 数据源与缓存
+    # ------------------------------------------------------------------
+    def test_weather_source_exposed(self):
+        self.plugin.location = "北京"
+        self.plugin.refreshWeather()
+        self.assertTrue(self.pump(lambda: self.plugin.nowWeather.get("temp") is not None))
+        self.assertEqual(self.plugin.weatherSource, svc.SOURCE_NMC)
+
+    def test_weather_cache_roundtrip(self):
+        self.plugin.location = "北京"
+        self.plugin.refreshWeather()
+        self.assertTrue(self.pump(lambda: self.plugin.nowWeather.get("temp") is not None))
+
+        # 新实例应当能从缓存里立刻拿到上次的数据
+        api2 = _FakeAPI(make_schedule())
+        plugin2 = plugin_main.Plugin(api2)
+        plugin2.meta = {"id": "com.starfall.betterday", "version": "1.1.0"}
+        plugin2.config.location = "北京"
+        self.assertTrue(plugin2._load_weather_cache())
+        self.assertEqual(plugin2.nowWeather["temp"], 12)
+        self.assertTrue(plugin2.lastUpdated)
+        plugin2.on_unload()
+
+    def test_weather_cache_ignores_other_city(self):
+        self.plugin.location = "北京"
+        self.plugin.refreshWeather()
+        self.assertTrue(self.pump(lambda: self.plugin.nowWeather.get("temp") is not None))
+
+        api2 = _FakeAPI(make_schedule())
+        plugin2 = plugin_main.Plugin(api2)
+        plugin2.meta = {"id": "com.starfall.betterday", "version": "1.1.0"}
+        plugin2.config.location = "上海"
+        self.assertFalse(plugin2._load_weather_cache())
+        plugin2.on_unload()
 
     def test_diagnostics(self):
         info = self.plugin.diagnostics()

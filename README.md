@@ -8,7 +8,7 @@
 
 ![Stars](https://img.shields.io/github/stars/starfall-miao/better-day?style=for-the-badge&color=pink&label=%E6%98%9F%E6%A0%87)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg?style=for-the-badge&label=%E8%AE%B8%E5%8F%AF%E8%AF%81)
-![Version](https://img.shields.io/badge/version-1.1.0-blue.svg?style=for-the-badge&label=%E7%89%88%E6%9C%AC)
+![Version](https://img.shields.io/badge/version-1.2.0-blue.svg?style=for-the-badge&label=%E7%89%88%E6%9C%AC)
 
 </div>
 
@@ -21,6 +21,7 @@
 - 🎉 **节日** —— 今天是什么节日，没有节日就告诉你最近的那个
 - 📜 **黄历** —— 农历、干支、宜忌
 - 📚 **课程** —— 现在正在上什么课 / 下一节是什么（可选，默认关闭）
+- 🧹 **值日生** —— 今天轮到谁值日、下一次是谁
 
 鼠标停在卡片上，轮换会暂停，方便你把这一页看完。小卡片旁边还有一颗小小的 `ⓘ` 按钮，轻轻一点，就会浮出一张**详情卡片**：
 
@@ -29,9 +30,22 @@
 | 🌦️ 天气 | 当前天气、体感、湿度、风、空气质量、日出日落、气象预警、**过去 24 小时温度走势**、未来 7 天 |
 | 📅 日历 · 黄历 | 带农历、节日、节气、法定节假日的月历 + 今日宜忌冲煞 + **最近的节日倒计时** |
 | 📚 课表 | 整周课程表（表格形式，标出今天，悬停看老师/教室） |
+| 🧹 值日生 | 今天值日的人、是第几组、下一次轮到谁 |
 | 💌 一言 | 每天一句悄悄话（可以手动换一句） |
 
-详情卡按 `Esc` 或点右上角 ✕ 关闭，也可以直接拖着走。
+详情卡按 `Esc` 或点右上角 ✕ 关闭，也可以直接拖着走；窗口高度会按当前屏幕自动收一收，小屏幕也放得下。
+
+### 🔕 灵动通知退让
+
+如果你在桌上放了 Class Widgets 的「灵动通知」小组件，通知弹出时本插件会**自动让位**：小卡片先淡出、再让出位置，详情卡也会暂时关掉，通知结束后自动回来（可在插件设置里关闭）。这样通知不会被一排卡片挤在旁边。
+
+### 🧹 值日生
+
+在 **设置 → 插件 → 更好的一天 → 值日生** 里填上名单（如「小明、小红、小刚、小丽」），选好每天几人、按周还是按天轮换，插件就会自动算：
+
+- 今天轮到哪一组、是第几组 / 共几组
+- 下一次换人是什么时候、轮到谁
+- 第一次保存名单时会自动记下起算日期，之后轮换不会「每周重置」（也可以手动改成开学日）
 
 ## 🛠️ 小卡片可以怎么玩
 
@@ -50,11 +64,13 @@
 | 刷新间隔 | 天气自动刷新间隔，5～240 分钟（默认 15 分钟） |
 | 自动刷新 | 关掉之后就只在手动刷新 / 换城市时更新 |
 | 气象预警 | 是否在小卡片和详情卡上显示中央气象台的预警 |
+| 灵动通知退让 | 灵动通知出现时小卡片 / 详情卡暂时让位（未放灵动通知小组件时自动不生效） |
+| 值日名单 / 每天几人 / 轮换方式 / 起算日期 | 值日生的数据与轮换规则 |
 | 立即刷新 | 天气、课表、黄历、一言一起重新拉一遍 |
 
 另外，插件会在**跨天那一刻**自动换上新一天的黄历、课表周次和一言，不用整晚开着也没关系～
 
-天气数据来自**中央气象台**（nmc.cn），**不用申请 API Key**，开箱即用；课表信息直接读 Class Widgets 里当前使用的那份课表（单双周 / 指定周 / 调课都会照做）。
+天气数据来自**中央气象台**（nmc.cn），**不用申请 API Key**，开箱即用；万一气象台抽风或访问不到，会自动切到备用源 **Open-Meteo**，并且把上一次成功的天气缓存到本地，重启后先显示旧数据再更新，不会开屏白板。课表信息直接读 Class Widgets 里当前使用的那份课表（单双周 / 指定周 / 调课都会照做）。
 
 ## 📦 安装
 
@@ -88,8 +104,8 @@ python -m unittest discover -s tests -v        # 顺带跑插件冒烟测试
 推送 `v*.*.*` 的 tag，GitHub Actions 会自动帮你打包并发布 Release：
 
 ```bash
-git tag v1.1.0
-git push origin v1.1.0
+git tag v1.2.0
+git push origin v1.2.0
 ```
 
 > 想要自动发布到插件广场？在仓库 Settings → Secrets 里添加 `CWPT_TOKEN`（从[插件广场控制台](https://plaza.cw.rinlit.cn/console)获取）就好啦。
@@ -98,7 +114,7 @@ git push origin v1.1.0
 
 数据与能力来自这些可爱的小伙伴：
 
-- ☁️ 天气 —— [中央气象台 nmc.cn](https://www.nmc.cn)（免费、无需 Key）
+- ☁️ 天气 —— [中央气象台 nmc.cn](https://www.nmc.cn)（免费、无需 Key），备用 [Open-Meteo](https://open-meteo.com)
 - 💬 每日一言 —— [Hitokoto](https://hitokoto.cn)
 - 📜 农历黄历 —— [lunar-python](https://github.com/6tail/lunar-python)
 - 🧩 平台 —— [Class Widgets 2](https://github.com/RinLit-233-shiroko/Class-Widgets-2) & [Class Widgets SDK](https://github.com/Class-Widgets/class-widgets-sdk)

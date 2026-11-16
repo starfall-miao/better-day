@@ -6,10 +6,19 @@ Class Widgets 2 插件入口。
 作者：落落
 """
 
+import json
+import os
 import threading
 from datetime import datetime, timedelta
 
-from PySide6.QtCore import Property, Qt, QTimer, Signal, Slot
+from PySide6.QtCore import (
+    Property,
+    QStandardPaths,
+    Qt,
+    QTimer,
+    Signal,
+    Slot,
+)
 
 from ClassWidgets.SDK import CW2Plugin, ConfigBaseModel, PluginAPI
 
@@ -20,6 +29,11 @@ import betterday_services as svc
 _MIN_REFRESH_MINUTES = 5
 _MAX_REFRESH_MINUTES = 240
 
+# 灵动通知退让：通知展示时长之外再留一点动画余量
+_RETREAT_EXTRA_MS = 700
+_RETREAT_MIN_MS = 600
+_RETREAT_MAX_MS = 30000
+
 
 class BetterDayConfig(ConfigBaseModel):
     """插件全局配置（由 Class Widgets 2 持久化）。"""
@@ -29,12 +43,22 @@ class BetterDayConfig(ConfigBaseModel):
     auto_refresh: bool = True  # 是否自动刷新天气
     show_warning: bool = True  # 是否显示气象预警
 
+    # ---- 值日生 ----
+    duty_names: str = ""  # 名单，逗号 / 顿号分隔
+    duty_per_day: int = 2  # 每天几人
+    duty_cycle: str = "week"  # week：按周轮换；day：按天轮换
+    duty_start_date: str = ""  # 起算日期（留空则自动填成配置当天）
+
+    # ---- 交互 ----
+    retreat_on_notify: bool = True  # 灵动通知出现时暂时隐藏小卡片
+
 
 class Plugin(CW2Plugin):
     """「更好的一天」插件主体，同时作为 Widget 与设置页的后端对象。"""
 
     dataChanged = Signal()
     configChanged = Signal()
+    retreatChanged = Signal()  # 灵动通知退让状态变化（给详情卡用）
 
     # 后台线程 → 主线程的投递信号。
     # 这些信号跨线程 connect，Qt 会自动排队到主线程执行对应槽，
@@ -59,6 +83,8 @@ class Plugin(CW2Plugin):
         self._week_schedule: dict = {"periods": [], "days": []}
         self._today_course: dict = {}
         self._calendar_cache: dict = {}
+        self._duty: dict = {}
+        self._weather_source: str = ""
 
         # ---- 状态 ----
         self._location_name: str = ""
@@ -69,13 +95,16 @@ class Plugin(CW2Plugin):
         self._alive: bool = True
         self._weather_loading: bool = False
         self._quote_loading: bool = False
+        self._retreat_active: bool = False
 
         # ---- 定时器（在 on_load 里创建，确保落在 GUI 线程）----
         self._weather_timer: QTimer | None = None
         self._clock_timer: QTimer | None = None
         self._day_timer: QTimer | None = None
         self._schedule_debounce: QTimer | None = None
+        self._retreat_timer: QTimer | None = None
         self._runtime_hooked: bool = False
+        self._notification_hooked: bool = False
         self._workers: list = []
 
         self._weatherDone.connect(self._on_weather_done, Qt.QueuedConnection)
@@ -108,6 +137,7 @@ class Plugin(CW2Plugin):
                 "show_festival": True,
                 "show_almanac": True,
                 "show_course": False,
+                "show_duty": True,
             },
         )
 
@@ -119,9 +149,12 @@ class Plugin(CW2Plugin):
 
         self._setup_timers()
         self._hook_runtime()
+        self._hook_notifications()
 
+        self._load_weather_cache()
         self._refresh_almanac()
         self._refresh_schedule()
+        self._refresh_duty()
         self._refresh_extras()
         self._refresh_weather()
         self._refresh_quote()
@@ -133,6 +166,7 @@ class Plugin(CW2Plugin):
             self._clock_timer,
             self._day_timer,
             self._schedule_debounce,
+            self._retreat_timer,
         ):
             if timer is not None:
                 try:
@@ -143,11 +177,20 @@ class Plugin(CW2Plugin):
         self._clock_timer = None
         self._day_timer = None
         self._schedule_debounce = None
+        self._retreat_timer = None
 
-        try:
-            self.api.runtime.updated.disconnect(self._on_runtime_updated)
-        except Exception:
-            pass
+        if self._runtime_hooked:
+            try:
+                self.api.runtime.updated.disconnect(self._on_runtime_updated)
+            except Exception:
+                pass
+            self._runtime_hooked = False
+        if self._notification_hooked:
+            try:
+                self.api.notification.pushed.disconnect(self._on_notification_pushed)
+            except Exception:
+                pass
+            self._notification_hooked = False
 
         # 等后台线程收尾（最多 1.5 秒），避免插件卸载后线程还在跑
         for worker in list(self._workers):
@@ -188,6 +231,7 @@ class Plugin(CW2Plugin):
         self._clock_timer = QTimer(self)
         self._clock_timer.setInterval(30 * 1000)
         self._clock_timer.timeout.connect(self.refreshTodayCourse)
+        self._clock_timer.timeout.connect(self._refresh_duty_if_changed)
         self._clock_timer.start()
 
         self._day_timer = QTimer(self)
@@ -199,6 +243,11 @@ class Plugin(CW2Plugin):
         self._schedule_debounce.setSingleShot(True)
         self._schedule_debounce.setInterval(2000)
         self._schedule_debounce.timeout.connect(self._refresh_schedule)
+
+        # 灵动通知退让：通知消失后把卡片放回来
+        self._retreat_timer = QTimer(self)
+        self._retreat_timer.setSingleShot(True)
+        self._retreat_timer.timeout.connect(lambda: self._set_retreat(False))
 
     def _apply_weather_interval(self):
         if self._weather_timer is None:
@@ -234,6 +283,7 @@ class Plugin(CW2Plugin):
         self._calendar_cache.clear()
         self._refresh_almanac()
         self._refresh_schedule()
+        self._refresh_duty()
         self._refresh_extras()
         self._refresh_weather()
         self._refresh_quote()
@@ -252,6 +302,59 @@ class Plugin(CW2Plugin):
             return
         # 运行时刷新可能很频繁，这里做 2 秒防抖
         self._schedule_debounce.start()
+
+    # ------------------------------------------------------------------
+    # 灵动通知退让
+    # ------------------------------------------------------------------
+    def _hook_notifications(self):
+        """监听应用内通知，通知出现时让卡片暂时隐藏。"""
+        try:
+            self.api.notification.pushed.connect(self._on_notification_pushed)
+            self._notification_hooked = True
+        except Exception:  # noqa: BLE001
+            self._notification_hooked = False
+
+    def _notification_widget_present(self) -> bool:
+        """当前小组件预设里是否存在「灵动通知」小组件。"""
+        try:
+            preferences = self.api.globalconfig.configs.preferences
+            presets = preferences.widgets_presets or {}
+            current = preferences.current_preset or ""
+            entries = presets.get(current) or []
+            for entry in entries:
+                type_id = getattr(entry, "type_id", None)
+                if type_id is None and isinstance(entry, dict):
+                    type_id = entry.get("type_id")
+                if type_id == "classwidgets.dynamicNotification":
+                    return True
+        except Exception:  # noqa: BLE001
+            return False
+        return False
+
+    def _on_notification_pushed(self, payload):
+        """有应用内通知时让开位置：隐藏小卡片，等通知消失后再回来。"""
+        if not self._alive or not self.config.retreat_on_notify:
+            return
+        if self._retreat_timer is None:
+            return
+        if not self._notification_widget_present():
+            # 没装灵动通知小组件就没必要让位置，免得卡片莫名其妙消失
+            return
+        try:
+            duration = int((payload or {}).get("duration") or 8000)
+        except (TypeError, ValueError):
+            duration = 8000
+        delay = max(_RETREAT_MIN_MS, min(_RETREAT_MAX_MS, duration + _RETREAT_EXTRA_MS))
+        self._set_retreat(True)
+        self._retreat_timer.start(delay)
+
+    def _set_retreat(self, active: bool):
+        active = bool(active)
+        if active == self._retreat_active:
+            return
+        self._retreat_active = active
+        self.retreatChanged.emit()
+        self.dataChanged.emit()
 
     # ------------------------------------------------------------------
     # 暴露给 QML 的数据属性
@@ -317,6 +420,21 @@ class Plugin(CW2Plugin):
     def hasWarning(self):
         return bool(self._now_weather.get("warning")) and bool(self.config.show_warning)
 
+    @Property(dict, notify=dataChanged)
+    def duty(self):
+        """今日值日生信息（含下一次）。"""
+        return self._duty
+
+    @Property(str, notify=dataChanged)
+    def weatherSource(self):
+        """这次天气数据来自哪个源（中央气象台 / Open-Meteo）。"""
+        return self._weather_source
+
+    @Property(bool, notify=retreatChanged)
+    def retreatActive(self):
+        """灵动通知正在展示：小卡片应当暂时让位。"""
+        return self._retreat_active
+
     # ------------------------------------------------------------------
     # 配置属性（供设置页读写）
     # ------------------------------------------------------------------
@@ -375,6 +493,89 @@ class Plugin(CW2Plugin):
 
     showWarning = Property(bool, _get_show_warning, _set_show_warning, notify=configChanged)
 
+    # ---- 值日生 ----
+    def _get_duty_names(self) -> str:
+        return self.config.duty_names
+
+    def _set_duty_names(self, value: str) -> None:
+        text = str(value or "").strip()
+        if text == (self.config.duty_names or ""):
+            return
+        self.config.duty_names = text
+        # 第一次配置名单时把起算日期记下来，之后轮换才不会「每周重置」
+        if text and not (self.config.duty_start_date or "").strip():
+            self.config.duty_start_date = datetime.now().date().isoformat()
+        self._refresh_duty()
+        self.configChanged.emit()
+
+    dutyNames = Property(str, _get_duty_names, _set_duty_names, notify=configChanged)
+
+    def _get_duty_per_day(self) -> int:
+        try:
+            return max(1, min(svc.DUTY_MAX_PER_DAY, int(self.config.duty_per_day)))
+        except (TypeError, ValueError):
+            return 2
+
+    def _set_duty_per_day(self, value: int) -> None:
+        try:
+            count = int(value)
+        except (TypeError, ValueError):
+            count = 2
+        count = max(1, min(svc.DUTY_MAX_PER_DAY, count))
+        if count == self.config.duty_per_day:
+            return
+        self.config.duty_per_day = count
+        self._refresh_duty()
+        self.configChanged.emit()
+
+    dutyPerDay = Property(int, _get_duty_per_day, _set_duty_per_day, notify=configChanged)
+
+    def _get_duty_cycle(self) -> str:
+        cycle = str(self.config.duty_cycle or svc.DUTY_CYCLE_WEEK)
+        return cycle if cycle in (svc.DUTY_CYCLE_WEEK, svc.DUTY_CYCLE_DAY) else svc.DUTY_CYCLE_WEEK
+
+    def _set_duty_cycle(self, value: str) -> None:
+        cycle = str(value or svc.DUTY_CYCLE_WEEK)
+        if cycle not in (svc.DUTY_CYCLE_WEEK, svc.DUTY_CYCLE_DAY):
+            cycle = svc.DUTY_CYCLE_WEEK
+        if cycle == self.config.duty_cycle:
+            return
+        self.config.duty_cycle = cycle
+        self._refresh_duty()
+        self.configChanged.emit()
+
+    dutyCycle = Property(str, _get_duty_cycle, _set_duty_cycle, notify=configChanged)
+
+    def _get_duty_start_date(self) -> str:
+        return self.config.duty_start_date or ""
+
+    def _set_duty_start_date(self, value: str) -> None:
+        text = str(value or "").strip()
+        if text == (self.config.duty_start_date or ""):
+            return
+        self.config.duty_start_date = text
+        self._refresh_duty()
+        self.configChanged.emit()
+
+    dutyStartDate = Property(str, _get_duty_start_date, _set_duty_start_date, notify=configChanged)
+
+    # ---- 灵动通知退让 ----
+    def _get_retreat_on_notify(self) -> bool:
+        return bool(self.config.retreat_on_notify)
+
+    def _set_retreat_on_notify(self, value: bool) -> None:
+        value = bool(value)
+        if value == self.config.retreat_on_notify:
+            return
+        self.config.retreat_on_notify = value
+        if not value:
+            self._set_retreat(False)
+        self.configChanged.emit()
+
+    retreatOnNotify = Property(
+        bool, _get_retreat_on_notify, _set_retreat_on_notify, notify=configChanged
+    )
+
     # ------------------------------------------------------------------
     # 槽函数
     # ------------------------------------------------------------------
@@ -382,6 +583,7 @@ class Plugin(CW2Plugin):
     def refreshAll(self):
         self._refresh_almanac()
         self._refresh_schedule()
+        self._refresh_duty()
         self._refresh_extras()
         self._refresh_weather()
         self._refresh_quote()
@@ -419,6 +621,10 @@ class Plugin(CW2Plugin):
             self._today_course = course
             self.dataChanged.emit()
 
+    @Slot()
+    def refreshDuty(self):
+        self._refresh_duty()
+
     @Slot(int, int, result=list)
     def calendar(self, year: int, month: int):
         key = (year, month)
@@ -453,6 +659,12 @@ class Plugin(CW2Plugin):
             "scheduleWeek": self._week_schedule.get("weekNumber") or 0,
             "hasSchedule": bool(self._week_schedule.get("hasData")),
             "lastUpdated": self._last_updated,
+            "weatherSource": self._weather_source,
+            "notificationHooked": self._notification_hooked,
+            "notificationWidget": self._notification_widget_present(),
+            "retreatActive": self._retreat_active,
+            "dutyEnabled": bool(self._duty.get("enabled")),
+            "dutyGroup": self._duty.get("groupLabel") or "",
         }
 
     # ------------------------------------------------------------------
@@ -513,6 +725,35 @@ class Plugin(CW2Plugin):
         )
         self.dataChanged.emit()
 
+    def _refresh_duty(self):
+        try:
+            duty = svc.build_duty(
+                self.config.duty_names,
+                per_day=self._get_duty_per_day(),
+                cycle=self._get_duty_cycle(),
+                start_date=self.config.duty_start_date or "",
+            )
+        except Exception as error:  # noqa: BLE001
+            duty = {"enabled": False, "names": [], "todayNames": [], "todayText": ""}
+            self._status = f"值日生计算失败：{error}"
+        self._duty = duty
+        self.dataChanged.emit()
+
+    def _refresh_duty_if_changed(self):
+        """时钟定时器里低成本地检查一次（跨周 / 跨天时需要换组）。"""
+        try:
+            duty = svc.build_duty(
+                self.config.duty_names,
+                per_day=self._get_duty_per_day(),
+                cycle=self._get_duty_cycle(),
+                start_date=self.config.duty_start_date or "",
+            )
+        except Exception:  # noqa: BLE001
+            return
+        if duty != self._duty:
+            self._duty = duty
+            self.dataChanged.emit()
+
     def _refresh_extras(self):
         """最近节日 + 前后月日历：耗时较长，放后台线程算。"""
         if not self._alive:
@@ -563,17 +804,10 @@ class Plugin(CW2Plugin):
 
     def _worker_weather(self, location):
         try:
-            resolved = svc.resolve_city(location)
-            if not resolved:
-                raise ValueError(f"找不到「{location}」这座城市，换个写法试试？")
-            raw = svc.fetch_weather_by_code(resolved["code"])
-            bundle = {
-                "resolved": resolved,
-                "now": svc.build_now_weather(raw),
-                "daily": svc.build_daily_weather(raw),
-                "trend": svc.build_hourly_trend(raw),
-                "fetchedAt": datetime.now(),
-            }
+            bundle = svc.fetch_weather_bundle(location)
+            bundle["fetchedAt"] = datetime.now()
+            bundle["query"] = location
+            self._save_weather_cache(bundle)
             if self._alive:
                 self._weatherDone.emit(bundle)
         except Exception as error:  # noqa: BLE001
@@ -603,10 +837,90 @@ class Plugin(CW2Plugin):
             "message": f"已匹配 {self._location_name}",
             "alternatives": [],
         }
+        source = bundle.get("source") or ""
+        self._weather_source = source
         fetched_at = bundle.get("fetchedAt") or datetime.now()
         self._last_updated = fetched_at.strftime("%H:%M")
-        self._status = "天气更新好啦 ✨"
+        if source and source != svc.SOURCE_NMC:
+            self._status = f"天气更新好啦（备用源 {source}）"
+        else:
+            self._status = "天气更新好啦 ✨"
         self.dataChanged.emit()
+
+    def _weather_cache_file(self):
+        try:
+            base = QStandardPaths.writableLocation(
+                QStandardPaths.StandardLocation.AppDataLocation
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        if not base:
+            return None
+        folder = os.path.join(base, "better-day")
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except OSError:
+            return None
+        return os.path.join(folder, "weather-cache.json")
+
+    def _save_weather_cache(self, bundle):
+        """把最近一次成功的天气存到磁盘，重启后先显示旧数据再更新。"""
+        path = self._weather_cache_file()
+        if not path:
+            return
+        try:
+            fetched_at = bundle.get("fetchedAt") or datetime.now()
+            payload = {
+                "query": bundle.get("query") or (self.config.location or ""),
+                "source": bundle.get("source") or "",
+                "fetchedAt": fetched_at.isoformat() if hasattr(fetched_at, "isoformat") else "",
+                "fetchedAtShort": fetched_at.strftime("%H:%M")
+                if hasattr(fetched_at, "strftime")
+                else "",
+                "resolved": bundle.get("resolved") or {},
+                "now": bundle.get("now") or {},
+                "daily": bundle.get("daily") or [],
+                "trend": bundle.get("trend") or {},
+            }
+            temp_path = path + ".tmp"
+            with open(temp_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False)
+            os.replace(temp_path, path)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _load_weather_cache(self):
+        """读取上一次的天气缓存，让卡片一开机就有内容。"""
+        path = self._weather_cache_file()
+        if not path or not os.path.exists(path):
+            return False
+        try:
+            with open(path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, ValueError):
+            return False
+        if not isinstance(payload, dict):
+            return False
+        query = (self.config.location or "").strip()
+        cached_query = svc.clean_text(payload.get("query"))
+        if cached_query and cached_query != query:
+            return False
+        now_weather = payload.get("now") or {}
+        if not now_weather or now_weather.get("temp") is None:
+            return False
+        self._now_weather = now_weather
+        self._daily_weather = payload.get("daily") or []
+        trend = payload.get("trend") or {}
+        if isinstance(trend, dict) and trend.get("points") is not None:
+            self._hourly_trend = trend
+        resolved = payload.get("resolved") or {}
+        if resolved:
+            self._location_name = self._format_location(resolved)
+        self._weather_source = payload.get("source") or ""
+        self._last_updated = payload.get("fetchedAtShort") or ""
+        self._status = "已显示上次的天气，正在更新…"
+        self.dataChanged.emit()
+        return True
 
     @Slot(str)
     def _on_weather_error(self, message):

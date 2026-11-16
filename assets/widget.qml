@@ -14,11 +14,42 @@ Widget {
     readonly property var almanac: (backend && backend.almanac) ? backend.almanac : ({})
     readonly property var course: (backend && backend.todayCourse) ? backend.todayCourse : ({})
     readonly property var festivals: (backend && backend.upcomingFestivals) ? backend.upcomingFestivals : []
+    readonly property var duty: (backend && backend.duty) ? backend.duty : ({})
     readonly property bool hasWeather: !!(backend && backend.hasWeather)
     readonly property bool hasWarning: !!(backend && backend.hasWarning)
+
+    // 灵动通知退让：通知出现时先淡出、再让出位置，通知结束后回来
+    readonly property bool retreating: !!(backend && backend.retreatActive)
+    property bool retreatHidden: false
+    visible: !retreatHidden
+    opacity: retreating ? 0 : 1
+    Behavior on opacity { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
+
+    Timer {
+        id: retreatHideTimer
+        interval: 140
+        onTriggered: root.retreatHidden = root.retreating
+    }
+
+    onRetreatingChanged: {
+        if (retreating) {
+            retreatHideTimer.restart()
+        } else {
+            retreatHideTimer.stop()
+            retreatHidden = false
+        }
+    }
     // 主题还没准备好时 Colors.proxy 可能还没有值，这里兜底成灰色
     readonly property color dimColor: (Colors && Colors.proxy && Colors.proxy.textSecondaryColor)
         ? Colors.proxy.textSecondaryColor : "#777777"
+
+    // ---------------- 尺寸 ----------------
+    // 每页文字宽度 + emoji 列 + ⓘ 按钮 + 左右内边距，值固定下来，
+    // 否则 BaseWidget 的 implicitWidth 会跟着内容区一起回缩、把文字挤扁
+    readonly property int pageTextWidth: 130
+    readonly property int pageWidth: pageTextWidth + 26
+    readonly property int infoButtonWidth: 28
+    implicitWidth: pageWidth + infoButtonWidth + 6 + 48
 
     // ---------------- 轮换配置 ----------------
     property int currentIndex: 0
@@ -30,6 +61,8 @@ Widget {
         if (!settings || settings.show_festival !== false) arr.push("festival")
         if (!settings || settings.show_almanac !== false) arr.push("almanac")
         if (settings && settings.show_course === true) arr.push("course")
+        if ((!settings || settings.show_duty !== false) && backend && backend.duty && backend.duty.enabled)
+            arr.push("duty")
         if (arr.length === 0) arr = ["now"]
         return arr
     }
@@ -44,6 +77,7 @@ Widget {
         case "festival": return 2
         case "almanac": return 3
         case "course": return 4
+        case "duty": return 5
         default: return 0
         }
     }
@@ -51,8 +85,8 @@ Widget {
     Timer {
         id: rotateTimer
         interval: (settings && settings.rotation_seconds ? settings.rotation_seconds : 10) * 1000
-        // 指针停在卡片上时暂停轮换，方便把内容看完
-        running: !root.hovered
+        // 指针停在卡片上 / 通知退让期间暂停轮换，方便把内容看完
+        running: !root.hovered && !root.retreating
         repeat: true
         onTriggered: {
             if (root.items.length > 1)
@@ -68,7 +102,7 @@ Widget {
         StackLayout {
             id: contentStack
             currentIndex: root.viewIndex
-            Layout.maximumWidth: 186
+            Layout.maximumWidth: root.pageWidth
 
             // ---- 0. 现在天气 ----
             RowLayout {
@@ -78,11 +112,13 @@ Widget {
                     font.pixelSize: 18
                 }
                 ColumnLayout {
+                    Layout.fillWidth: true
                     spacing: 0
                     MarqueeTitle {
-                        Layout.maximumWidth: 138
-                        maximumWidth: 138
-                        font.pixelSize: 15
+                        Layout.fillWidth: true
+                        Layout.maximumWidth: root.pageTextWidth
+                        maximumWidth: root.pageTextWidth
+                        font.pixelSize: root.miniMode ? 13 : 15
                         speed: 40
                         text: {
                             if (root.hasWeather)
@@ -91,11 +127,11 @@ Widget {
                         }
                     }
                     Text {
-                        Layout.maximumWidth: 138
-                        width: 138
+                        Layout.fillWidth: true
+                        Layout.maximumWidth: root.pageTextWidth
                         elide: Text.ElideRight
                         maximumLineCount: 1
-                        font.pixelSize: 12
+                        font.pixelSize: root.miniMode ? 10 : 12
                         opacity: 0.6
                         color: root.hasWarning ? "#D96A32" : root.dimColor
                         text: {
@@ -118,22 +154,24 @@ Widget {
                     font.pixelSize: 18
                 }
                 ColumnLayout {
+                    Layout.fillWidth: true
                     spacing: 0
                     MarqueeTitle {
-                        Layout.maximumWidth: 138
-                        maximumWidth: 138
-                        font.pixelSize: 15
+                        Layout.fillWidth: true
+                        Layout.maximumWidth: root.pageTextWidth
+                        maximumWidth: root.pageTextWidth
+                        font.pixelSize: root.miniMode ? 13 : 15
                         speed: 40
                         text: (root.dailyWeather.length > 1)
                             ? (qsTr("明天 ") + (root.dailyWeather[1].text || ""))
                             : (root.hasWeather ? qsTr("明天天气还没出来") : qsTr("天气加载中…"))
                     }
                     Text {
-                        Layout.maximumWidth: 138
-                        width: 138
+                        Layout.fillWidth: true
+                        Layout.maximumWidth: root.pageTextWidth
                         elide: Text.ElideRight
                         maximumLineCount: 1
-                        font.pixelSize: 12
+                        font.pixelSize: root.miniMode ? 10 : 12
                         opacity: 0.6
                         color: root.dimColor
                         text: (root.dailyWeather.length > 1
@@ -152,11 +190,13 @@ Widget {
                     font.pixelSize: 18
                 }
                 ColumnLayout {
+                    Layout.fillWidth: true
                     spacing: 0
                     MarqueeTitle {
-                        Layout.maximumWidth: 138
-                        maximumWidth: 138
-                        font.pixelSize: 15
+                        Layout.fillWidth: true
+                        Layout.maximumWidth: root.pageTextWidth
+                        maximumWidth: root.pageTextWidth
+                        font.pixelSize: root.miniMode ? 13 : 15
                         speed: 40
                         text: {
                             var al = root.almanac
@@ -171,11 +211,11 @@ Widget {
                         }
                     }
                     Text {
-                        Layout.maximumWidth: 138
-                        width: 138
+                        Layout.fillWidth: true
+                        Layout.maximumWidth: root.pageTextWidth
                         elide: Text.ElideRight
                         maximumLineCount: 1
-                        font.pixelSize: 12
+                        font.pixelSize: root.miniMode ? 10 : 12
                         opacity: 0.6
                         color: root.dimColor
                         text: {
@@ -203,22 +243,24 @@ Widget {
                     font.pixelSize: 18
                 }
                 ColumnLayout {
+                    Layout.fillWidth: true
                     spacing: 0
                     MarqueeTitle {
-                        Layout.maximumWidth: 138
-                        maximumWidth: 138
-                        font.pixelSize: 15
+                        Layout.fillWidth: true
+                        Layout.maximumWidth: root.pageTextWidth
+                        maximumWidth: root.pageTextWidth
+                        font.pixelSize: root.miniMode ? 13 : 15
                         speed: 40
                         text: root.almanac.lunarMonthDay
                             ? root.almanac.lunarMonthDay
                             : qsTr("黄历加载中…")
                     }
                     Text {
-                        Layout.maximumWidth: 138
-                        width: 138
+                        Layout.fillWidth: true
+                        Layout.maximumWidth: root.pageTextWidth
                         elide: Text.ElideRight
                         maximumLineCount: 1
-                        font.pixelSize: 12
+                        font.pixelSize: root.miniMode ? 10 : 12
                         opacity: 0.6
                         color: root.dimColor
                         text: {
@@ -239,20 +281,22 @@ Widget {
                     font.pixelSize: 18
                 }
                 ColumnLayout {
+                    Layout.fillWidth: true
                     spacing: 0
                     MarqueeTitle {
-                        Layout.maximumWidth: 138
-                        maximumWidth: 138
-                        font.pixelSize: 15
+                        Layout.fillWidth: true
+                        Layout.maximumWidth: root.pageTextWidth
+                        maximumWidth: root.pageTextWidth
+                        font.pixelSize: root.miniMode ? 13 : 15
                         speed: 40
                         text: root.course.title ? root.course.title : qsTr("今天没有课")
                     }
                     Text {
-                        Layout.maximumWidth: 138
-                        width: 138
+                        Layout.fillWidth: true
+                        Layout.maximumWidth: root.pageTextWidth
                         elide: Text.ElideRight
                         maximumLineCount: 1
-                        font.pixelSize: 12
+                        font.pixelSize: root.miniMode ? 10 : 12
                         opacity: 0.6
                         color: root.dimColor
                         text: {
@@ -264,13 +308,51 @@ Widget {
                     }
                 }
             }
+
+            // ---- 5. 值日生 ----
+            RowLayout {
+                spacing: 6
+                Text {
+                    text: "🧹"
+                    font.pixelSize: 18
+                }
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 0
+                    MarqueeTitle {
+                        Layout.fillWidth: true
+                        Layout.maximumWidth: root.pageTextWidth
+                        maximumWidth: root.pageTextWidth
+                        font.pixelSize: root.miniMode ? 13 : 15
+                        speed: 40
+                        text: root.duty.todayText ? (qsTr("值日 ") + root.duty.todayText) : qsTr("今天没有值日")
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        Layout.maximumWidth: root.pageTextWidth
+                        elide: Text.ElideRight
+                        maximumLineCount: 1
+                        font.pixelSize: root.miniMode ? 10 : 12
+                        opacity: 0.6
+                        color: root.dimColor
+                        text: {
+                            var d = root.duty
+                            if (!d.enabled) return qsTr("还没配置值日名单")
+                            if (d.groupLabel) return d.groupLabel + " · " + qsTr("下次 ") + (d.nextDateShort || "")
+                            return d.nextDateShort ? (qsTr("下次 ") + d.nextDateShort) : qsTr("值日生")
+                        }
+                    }
+                }
+            }
         }
 
         ToolButton {
             id: infoButton
             icon.name: "ic_fluent_info_20_regular"
-            implicitWidth: 22
-            implicitHeight: 22
+            Layout.preferredWidth: root.infoButtonWidth
+            Layout.preferredHeight: root.infoButtonWidth
+            Layout.minimumWidth: root.infoButtonWidth
+            Layout.maximumWidth: root.infoButtonWidth
             onClicked: toggleDetail()
             ToolTip {
                 text: qsTr("查看详情")

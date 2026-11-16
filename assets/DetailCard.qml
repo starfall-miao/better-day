@@ -36,6 +36,7 @@ Window {
     readonly property var festivals: (backend && backend.upcomingFestivals) ? backend.upcomingFestivals : []
     readonly property var schedule: (backend && backend.weekSchedule) ? backend.weekSchedule : ({})
     readonly property var quoteData: (backend && backend.quote) ? backend.quote : ({})
+    readonly property var duty: (backend && backend.duty) ? backend.duty : ({})
     readonly property bool warningVisible: !!(nowWeather.warning && (!backend || backend.showWarning))
 
     // ---- 日历状态 ----
@@ -82,6 +83,10 @@ Window {
     function openNear(ax, ay, aw, ah) {
         goToday()
         var s = screenAt(ax, ay)
+        // 小屏幕上把窗口高度收一收，免得超出屏幕
+        var availableHeight = s.height - 24
+        if (availableHeight > 240 && root.height > availableHeight)
+            root.height = availableHeight
         var x = ax
         var y = ay + ah + 8 // 默认显示在小卡片下方，左对齐
 
@@ -104,6 +109,16 @@ Window {
         sequence: "Escape"
         enabled: root.visible
         onActivated: root.close()
+    }
+
+    // 灵动通知出现时让位，别挡住通知
+    Connections {
+        target: root.backend
+        ignoreUnknownSignals: true
+        function onRetreatChanged() {
+            if (root.backend && root.backend.retreatActive && root.visible)
+                root.close()
+        }
     }
 
     Component.onCompleted: goToday()
@@ -139,6 +154,7 @@ Window {
                     text: {
                         var parts = []
                         if (backend && backend.locationName) parts.push(backend.locationName)
+                        if (backend && backend.weatherSource) parts.push(backend.weatherSource)
                         if (backend && backend.lastUpdated) parts.push(qsTr("更新于 ") + backend.lastUpdated)
                         return parts.join(" · ")
                     }
@@ -223,6 +239,9 @@ Window {
                                     spacing: 2
                                     Title {
                                         px: 26
+                                        width: Math.max(0, panelColumn.width - 100)
+                                        wrapMode: Text.WordWrap
+                                        maximumLineCount: 2
                                         text: (root.nowWeather.temp !== undefined && root.nowWeather.temp !== null)
                                             ? (root.nowWeather.temp + "°  " + (root.nowWeather.text || ""))
                                             : ((backend && backend.statusText) ? backend.statusText : qsTr("加载中…"))
@@ -798,7 +817,61 @@ Window {
                         }
                     }
 
-                    // ============ 卡片 4：每日一言 ============
+                    // ============ 卡片 4：值日生 ============
+                    Rectangle {
+                        width: parent.width
+                        radius: 12
+                        height: dutyColumn.height + 28
+                        visible: !!root.duty.enabled
+                        color: root.dark ? Qt.alpha("#ffffff", 0.06) : Qt.alpha("#000000", 0.035)
+
+                        Column {
+                            id: dutyColumn
+                            width: parent.width - 24
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            anchors.top: parent.top
+                            anchors.topMargin: 14
+                            spacing: 6
+
+                            Row {
+                                width: parent.width
+                                Text {
+                                    text: qsTr("今天值日")
+                                    color: root.textColor
+                                    font.pixelSize: 14
+                                    font.weight: 700
+                                }
+                                Item { width: Math.max(0, parent.width - 240); height: 1 }
+                                Text {
+                                    width: 140
+                                    horizontalAlignment: Text.AlignRight
+                                    color: root.dimColor
+                                    font.pixelSize: 12
+                                    text: root.duty.groupLabel || ""
+                                }
+                            }
+
+                            MarqueeTitle {
+                                width: parent.width
+                                maximumWidth: parent.width
+                                font.pixelSize: 18
+                                speed: 45
+                                text: root.duty.todayText || "—"
+                            }
+
+                            Text {
+                                width: parent.width
+                                wrapMode: Text.WordWrap
+                                color: root.dimColor
+                                font.pixelSize: 12
+                                text: (root.duty.nextDateShort || "")
+                                    ? (qsTr("下一次：") + root.duty.nextDateShort + " · " + (root.duty.nextText || ""))
+                                    : ""
+                            }
+                        }
+                    }
+
+                    // ============ 卡片 5：每日一言 ============
                     Rectangle {
                         width: parent.width
                         radius: 12
